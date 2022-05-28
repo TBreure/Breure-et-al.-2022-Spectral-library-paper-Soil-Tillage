@@ -1,0 +1,953 @@
+# Breure et al. (2022)
+# Comparing the effect of different sample conditions ... 
+# Soil and Tillage research
+# https://doi.org/10.1016/j.still.2021.105196
+
+# Local library script VNIR/MIR/VNIRMIR datasets
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# LIBRARIES -----------------------------------------------------------
+library(tidyverse)
+library(broom)
+library(modelr)
+library(cowplot)
+library(GeomComb)
+library(clhs)
+library(resemble)
+library(epiR)
+library(prospectr)
+library(pls)
+library(tidyverse)
+
+# closeAllConnections()
+
+```  
+
+Read in the data
+```{r, echo = FALSE, warning = FALSE}
+
+# Reading in the data
+gc()
+rm(list = ls())
+setwd("C:/Users/breur005/OneDrive - Wageningen University & Research/Rothamsted/Manuscript_2/Data")
+list.files()
+
+# Set seed
+set.seed(123)
+
+# Set ggplot theme
+theme_set(theme_bw())
+
+# WET CHEMISTRY -----------------------------------------------------------
+
+WetCh_nm <- list("Wet_Chem_P", "Wet_Chem_ST", "Wet_Chem_T2", "Wet_Chem_K6")
+
+WetCh_l <- lapply(1:length(WetCh_nm),
+                  function (z)
+                    read.table(paste(WetCh_nm[[z]],
+                                     ".txt",
+                                     sep = ""),
+                               header = T,
+                               sep = '\t'))
+
+SubCh_l <- vector("list",length  = length(WetCh_l))
+
+for(i in 1:length(WetCh_l)){
+  SubCh_l[[i]] <- WetCh_l[[i]] %>% 
+    dplyr::select(.,
+                  ID = ID,
+                  "CALCIUM" = M_Ca,
+                  "MAGNESIUM" = M_Mg,
+                  "SODIUM" = M_Na,
+                  "SULPHUR" = M_S,
+                  "CARBON" = M_C,
+                  "PH" = pH,
+                  "P_OLSEN" = PO4_ppm,
+                  "K_NITRATE" = M_K,
+                  "CLAY" = Clay_perc9,
+                  "SAND" = Sand_perc,
+                  "SILT" = Silt_perc9)
+}
+
+
+
+for (i in 1:length(SubCh_l)){
+  print(paste("Field", i))
+  print(psych::describe(SubCh_l[[i]][,2:ncol(SubCh_l[[i]])]))
+}
+
+# ------------------------------ Spectral data --------------------------------------
+# -----------------------------------------------------------------------------------
+
+# Read data
+# NIR / MIR for each sample condition (field, unprocessed, air-dried, ground)
+Spc <- list(list(
+            list("Cal_FIELD.txt", "Cal_FIELD_ST.txt",
+                 "Cal_FIELD_T2.txt", "Cal_FIELD_K6.txt"),
+            list("Cal_UNP.txt", "Cal_UNP_ST.txt",
+                 "Cal_UNP_T2.txt", "Cal_UNP_K6.txt"),
+            list("Cal_AIR.txt", "Cal_AIR_ST.txt",
+                 "Cal_AIR_T2.txt", "Cal_AIR_K6.txt"),
+            list("GR_NIR.txt", "GR_NIR_ST.txt",
+                 "GR_NIR_T2.txt","GR_NIR_K6.txt")
+            ),
+            list(
+            list("Cal_FIELD_MIR.txt", "Cal_FIELD_MIR_ST.txt",
+                 "Cal_FIELD_MIR_T2.txt", "Cal_FIELD_MIR_K6.txt"),
+            list("Cal_UNP_MIR.txt", "Cal_UNP_MIR_ST.txt",
+                 "Cal_UNP_MIR_T2.txt", "Cal_UNP_MIR_K6.txt"),
+            list("Cal_AIR_MIR.txt", "Cal_AIR_MIR_ST.txt",
+                 "Cal_AIR_MIR_T2.txt", "Cal_AIR_MIR_K6.txt"),
+            list("GR_MIR.txt", "GR_MIR_ST.txt",
+                 "GR_MIR_T2.txt","GR_MIR_K6.txt")
+            ))
+
+# Read tables
+Spc_df <- lapply(1:length(Spc), 
+                 function (z) 
+                   lapply(1:length(Spc[[z]]), 
+                                     function (s)
+                                       lapply(1:length(Spc[[z]][[s]]),
+                                              function (x)
+                                       read.table(Spc[[z]][[s]][[x]],
+                                                             header = T,
+                                                             check.names = F,
+                                                             sep = '\t'))))
+
+# Write spectra as sub-dataframe (if all wavebands are retained!)
+# NOTE: Only works if not any other columns have a numeric value as header
+spc_subdf <- function(df){
+  spc <- as.matrix(df[,8:ncol(df)])
+  df <- df[,-c(8:ncol(df))]
+  df$spc <- spc
+  return(df)
+}
+
+Spcdf <- lapply(1:length(Spc_df), 
+                function (z) 
+                  lapply(1:length(Spc_df[[z]]),
+                         function (s)
+                           lapply(1:length(Spc_df[[z]][[s]]),
+                                  function (x)
+                           spc_subdf(Spc_df[[z]][[s]][[x]])
+                  )
+                  )
+        )
+
+
+# First convert wavenumber to wavelength for Tensor II NIR spectra
+# I.e. given the different ranges of the spectrometers, wavenumber reduces emphasis on VIS for FieldSpec4 spectra
+# I.e. decided not to convert absorbance to reflectance as there is negative absorbance values in the NSI spectra
+
+for (j in 1:4){         # 4 fields
+  colnames(Spcdf[[1]][[4]][[j]]$spc) <-   round(10000000/as.numeric(colnames(Spcdf[[1]][[4]][[j]]$spc)),1) 
+  }
+
+# Convert reflectance to absorbance to align with Tensor II spectra
+for (j in 1:3){
+  for (i in 1:length(Spcdf[[1]][[j]])){         # 4 fields
+  Spcdf[[1]][[j]][[i]]$spc <- log10(1/Spcdf[[1]][[j]][[i]]$spc) 
+  }
+}
+
+FTIR_spc_proc <- function(df){
+  df$sg <- prospectr::savitzkyGolay(df$spc, p = 3, w = 11, m = 0)
+  df$snv <- prospectr::standardNormalVariate(X = df$sg)
+  df$d1 <- t(diff(t(df$sg), differences = 1))
+  df$d2 <- t(diff(t(df$sg), differences = 2))
+  df$gapD1 <- gapDer(X = df$snv, m = 1, w = 11, s = 8)
+  return(df)
+}
+
+NIR_spc_proc <- function(df){
+  df$sgNIR <- savitzkyGolay(df$spc, p = 3, w = 11, m = 0)
+  df$snvNIR <- standardNormalVariate(X = df$sgNIR)
+  df$d1 <- t(diff(t(df$sg), differences = 1))
+  df$d2 <- t(diff(t(df$sg), differences = 2))
+  df$gapD1NIR <- gapDer(X = df$snvNIR, m = 1, w = 11, s=31)
+  #df$snv_d2 <- gapDer(X = df$snv, m = 2, w = 11)
+  return(df)
+}
+
+prc_list <- list(NIR_spc_proc, FTIR_spc_proc)
+
+Spcdf <- lapply(1:length(prc_list),
+                function (s)
+                  lapply(1:length(Spcdf[[s]]),
+                         function (z)
+                           lapply(1:length(Spcdf[[s]][[z]]),
+                                  function (x)
+                           prc_list[[s]](Spcdf[[s]][[z]][[x]]))))
+
+# Remove bands functions
+NIRremovebands <- function(df,uplim,lolim){
+  df$spc <- df$spc[,c((colnames(df$spc) > uplim | colnames(df$spc) < lolim))]
+  df$sgNIR <- df$sgNIR[,c((colnames(df$sgNIR) > uplim | colnames(df$sgNIR) < lolim))]
+  df$snvNIR <- df$snvNIR[,c((colnames(df$snvNIR) > uplim | colnames(df$snvNIR) < lolim))]
+  df$d1 <- df$d1[,c((colnames(df$d1) > uplim | colnames(df$d1) < lolim))]
+  df$d2 <- df$d2[,c((colnames(df$d2) > uplim | colnames(df$d2) < lolim))]
+  df$gapD1NIR <- df$gapD1NIR[,c((colnames(df$gapD1NIR) > uplim | colnames(df$gapD1NIR) < lolim))]
+  return(df)
+}
+
+FTIRremovebands <- function(df,uplim,lolim){
+  df$spc <- df$spc[,c((colnames(df$spc) > uplim | colnames(df$spc) < lolim))]
+  df$sg <- df$sg[,c((colnames(df$sg) > uplim | colnames(df$sg) < lolim))]
+  df$snv <- df$snv[,c((colnames(df$snv) > uplim | colnames(df$snv) < lolim))]
+  df$d1 <- df$d1[,c((colnames(df$d1) > uplim | colnames(df$d1) < lolim))]
+  df$d2 <- df$d2[,c((colnames(df$d2) > uplim | colnames(df$d2) < lolim))]
+  df$gapD1 <- df$gapD1[,c((colnames(df$gapD1) > uplim | colnames(df$gapD1) < lolim))]
+  return(df)
+}
+
+
+
+bands_l <- 1265 # 7900
+bands_h <- 1460 # 6849
+# Remove bands for (V)NIR
+for(i in 1:4){
+  for (j in 1:length(Spcdf[[1]][[i]])){
+  Spcdf[[1]][[i]][[j]] <- NIRremovebands(Spcdf[[1]][[i]][[j]],
+                                     bands_h,
+                                     bands_l)
+  }
+}
+
+bands_l <- 1789 # 5587
+bands_h <- 1960 # 5102
+# Remove bands for (V)NIR
+for(i in 1:4){
+  for (j in 1:length(Spcdf[[1]][[i]])){
+  Spcdf[[1]][[i]][[j]] <- NIRremovebands(Spcdf[[1]][[i]][[j]],
+                                     bands_h,
+                                     bands_l)
+  }
+}
+
+bands_h <- 2430
+bands_l <- 2260
+# Remove bands for FTIR
+for(i in 1:length(Spcdf[[2]])){
+  for (j in 1:length(Spcdf[[2]][[i]])){
+  Spcdf[[2]][[i]][[j]] <- FTIRremovebands(Spcdf[[2]][[i]][[j]],
+                                     bands_h,
+                                     bands_l)
+  }
+}
+
+
+
+# Rename raw NIR spc
+for (i in 1:length(Spcdf[[1]])){
+  for (j in 1:length(Spcdf[[1]][[i]]))
+  Spcdf[[1]][[i]][[j]]$spcNIR <- Spcdf[[1]][[i]][[j]]$spc
+}
+
+
+# set std color
+stdcol = rgb(red = .8, green = .1, blue = .1, alpha = .15)
+
+quick_matplt <- function(df,xlab,ylab,main,col){
+  tempplt <- matplot(as.numeric(colnames(df)),
+                     t(df),
+                     type = "l",
+                     lty = 1,
+                     xlab = xlab,
+                     ylab = ylab,
+                     col = col,
+                     xlim = rev(range(as.numeric(colnames(df)))),
+                     main = main)
+  grid()
+  return(tempplt)
+}
+
+ylab <- c("Reflectance", "Absorbance")
+xlab <- c("Wavelength / nm", "Wavenumber / cm")
+
+# Plot all fields for each processing type (i.e. field, soil moisture, air-dried)
+par(mfrow = c(2,2))
+Spcplt <- lapply(1:length(Spcdf), 
+                 function (z)
+                   lapply(1:length(Spcdf[[z]]),
+                          function (s)
+                            lapply(1:length(Spcdf[[z]][[s]]),
+                                   function (x)
+                            quick_matplt(Spcdf[[z]][[s]][[x]]$sg,
+                                         xlab[z],
+                                         ylab[z],
+                                         "-",
+                                         stdcol))))
+
+
+
+# Merge with wet chem 
+Cal_Spcdf <- lapply(1:length(Spcdf), 
+                 function (z)
+                   lapply(1:length(Spcdf[[z]]),
+                          function (s)
+                            lapply(1:length(Spcdf[[z]][[s]]),
+                                   function (x)
+                                     merge(SubCh_l[[x]],
+                                           Spcdf[[z]][[s]][[x]],
+                                           by = c("ID")))))
+
+# Check dimensions of (V)NIR datasets
+for (i in 1:length(Cal_Spcdf[[1]])){
+  for (j in 1:length(Cal_Spcdf[[1]][[i]])){
+    print(dim(Cal_Spcdf[[1]][[i]][[j]]))
+  }
+}
+
+# Check dimensions for FTIR datasets
+for (i in 1:length(Cal_Spcdf[[2]])){
+  for (j in 1:length(Cal_Spcdf[[2]][[i]])){
+    print(dim(Cal_Spcdf[[2]][[i]][[j]]))
+  }
+}
+
+
+# Set Field column for T2 and K6
+Cal_Spcdf[[1]][[4]][[3]]$Field <- "F3"
+Cal_Spcdf[[1]][[4]][[4]]$Field <- "F4"
+Cal_Spcdf[[2]][[4]][[3]]$Field <- "F3"
+Cal_Spcdf[[2]][[4]][[4]]$Field <- "F4"
+
+
+Cal_Compl_df <- lapply(1:length(Cal_Spcdf),
+                       function (z)
+                         lapply(1:length(Cal_Spcdf[[z]]),
+                                function (x)
+                                  do.call(rbind, Cal_Spcdf[[z]][[x]])))
+
+test <- merge(Cal_Compl_df[[1]][[1]],
+              Cal_Compl_df[[2]][[1]][,c("ID","Field","gapD1")],
+              by = c("ID", "Field"))
+
+Cal_df <- lapply(1:length(Cal_Compl_df),
+                 function (z)
+                   lapply(1:length(Cal_Compl_df[[z]]),
+                          function (s)
+                            Cal_Compl_df[[z]][[s]][interaction(Cal_Compl_df[[z]][[s]][,c("ID","Field")]) %in%  interaction(test[,c("ID","Field")]),]))
+
+for (i in 1:length(Cal_df[[1]])){
+  print(dim(Cal_df[[1]][[i]]))
+}
+
+# Run again because of incomplete Unprocessed dataset for Field 3
+Cal_df <- lapply(1:length(Cal_df),
+                 function (z)
+                   lapply(1:length(Cal_df[[z]]),
+                          function (s)
+                            Cal_df[[z]][[s]][interaction(Cal_df[[z]][[s]][,c("ID","Field")]) %in%  interaction(Cal_df[[1]][[2]][,c("ID","Field")]),]))
+
+# Check
+for (i in 1:length(Cal_df[[2]])){
+  print(dim(Cal_df[[2]][[i]]))
+}
+
+
+```
+
+# Calibration / validation subsetting
+# Spectra based method
+
+```{r, echo = F, warning = F}
+
+
+select_df <- merge(Cal_df[[2]][[4]],
+                   Cal_df[[1]][[4]][,c("ID","Field","gapD1NIR")],
+                   by = c("ID", "Field"))
+
+select_df$d1_merg <- cbind(select_df$gapD1NIR,select_df$gapD1)
+
+ken_euclid <- kenStone(X = select_df$d1_merg, 
+                      k = round(nrow(select_df)*0.75), 
+                      metric = "euclid")
+
+Compl_Cal_df <- vector("list", length(Cal_df[[1]]))
+for (i in 1:length(Cal_df[[1]])){
+  Compl_Cal_df[[i]] <- merge(Cal_df[[2]][[i]],
+                   Cal_df[[1]][[i]][,c("ID","Field","gapD1NIR")],
+                   by = c("ID", "Field"))
+  }
+
+for (i in 1:length(Compl_Cal_df)){
+  print(dim(Compl_Cal_df[[i]]))
+}
+
+train_df <- vector("list", length(Compl_Cal_df))
+for (i in 1:length(Compl_Cal_df)){
+    train_df[[i]] <- Compl_Cal_df[[i]][ken_euclid$model,]
+  }
+
+
+test_df <- vector("list", length(Compl_Cal_df))
+for (i in 1:length(Compl_Cal_df)){
+    test_df[[i]] <- Compl_Cal_df[[i]][ken_euclid$test,]
+  }
+
+
+# Check dimensions
+for (i in 1:length(train_df)){
+  print(dim(train_df[[i]]))
+}
+
+for (i in 1:length(test_df)){
+  print(dim(test_df[[i]]))
+}
+
+
+# Write sample ID calibration set
+write.table(train_df[[1]][,c("ID","Field")],
+            "train_ID.txt",
+            sep = '\t',
+            col.names = T, row.names = F)
+
+# Write sample ID test set
+write.table(test_df[[1]][,c("ID","Field")],
+            "test_ID.txt",
+            sep = '\t',
+            col.names = T, row.names = F)
+
+
+
+```
+
+
+# PLS modelling
+
+# NOTE : Absolute minimum to select nr of components
+# Color scatter plots by Field factor
+
+```{r, echo = F, warning = F}
+
+# Indexing different training datasets
+train_l <- train_df
+out_l <- vector("list", length(train_l))
+
+# Indexing spectral matrices and output list
+spc_matrix_l <- c("gapD1NIR", "gapD1")
+spc_m_out <- vector("list", length(spc_matrix_l))
+
+
+# Indexing soil variables to predict
+var_l <- c("CALCIUM","CARBON", "PH",
+                  "K_NITRATE", "P_OLSEN", "CLAY")
+
+for (ii in 1:length(train_l)){
+  Pls_l <- lapply(spc_matrix_l,
+                function (z)
+                  lapply(1:length(var_l),
+                         function(s)
+                           plsr(as.formula(paste(var_l[[s]],"~",as.name(z))),
+                                scale = F, trace = T,
+                                ncomp = 15, data = train_l[[ii]],
+                                validation = "LOO")
+  ))
+  out_l[[ii]] <- Pls_l
+  }
+
+
+```
+
+# Select components and predict on training dataset
+
+```{r, echo = F, warning = F}
+
+# Plot RMSE as a function of nr of components and save nr of components that minimize RMSE
+min.Abs <- vector("list",length(train_l))
+
+for(ii in 1:length(out_l)){
+  for(z in 1:length(out_l[[ii]])){
+  temp_comp <- lapply(1:length(out_l[[ii]][[z]]),
+                  function (s)
+                    which.min(
+                      as.data.frame(
+                        RMSEP(out_l[[ii]][[z]][[s]])$val)[1,2:16]))
+  temp_comp <- ifelse(temp_comp==0,1,temp_comp)
+  min.Abs[[ii]][[z]] <- temp_comp
+  }
+  }
+
+
+
+test_l <- test_df
+Pred_l <- vector("list",length(test_l))
+
+# Predict most parsimonious models on test set
+type_df <- c("Field", "Unprocessed", "Air-dried", "Ground")
+spc_df <- c("(V)NIR", "MIR")
+
+for(ii in 1:length(test_l)){
+ Pred_l[[ii]] <- lapply(1:length(out_l[[ii]]),
+                        function(xx)
+                      lapply(1:length(out_l[[ii]][[xx]]),
+                               function (z)
+                                 data.frame(Measured = test_l[[ii]][,var_l[[z]]],
+                                            Predicted = 
+                   c(predict(
+                     out_l[[ii]][[xx]][[z]],
+                     newdata = 
+                       test_l[[ii]],
+                     ncomp = min.Abs[[ii]][[xx]][[z]])
+                     ),
+                   Soil_property = c(
+                                  rep(
+                                    var_l[[z]],
+                                    nrow(test_l[[ii]]))),
+                                Type = c(rep(type_df[[ii]],
+                                           nrow(test_l[[ii]]))),
+                                Spc_matrix = c(rep(spc_df[[xx]],
+                                                   nrow(test_l[[ii]]))),
+                   Field = test_l[[ii]]$Field
+                                 )))
+ }
+
+
+for (ii in 1:length(type_df)){
+  for (z in 1:length(spc_df)){
+    for (j in 1:length(var_l)){
+      Pred_l[[ii]][[z]][[j]] <-  Pred_l[[ii]][[z]][[j]] %>% 
+     mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd = sd(sqrt((Predicted-Measured)^2)),
+      CCC = c(rep(epiR::epi.ccc(Predicted,Measured)$rho.c$est,
+                     nrow(test_l[[ii]]))),
+      SD_M = sd(Measured),
+      Bias = round(mean(Predicted-Measured),2),
+      SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+      IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+        mutate(.,
+               RPIQ = signif((IQ/SEP),2),
+               RPD = signif((SD_M/RMSE),2))
+    }
+  }
+}
+
+Pred_train_l <- vector("list", length(train_l))
+
+# Predict most parsimonious models on training set
+for(ii in 1:length(train_l)){
+ Pred_train_l[[ii]] <- lapply(1:length(out_l[[ii]]),
+                        function(xx)
+                          lapply(1:length(out_l[[ii]][[xx]]),
+                               function (z)
+                   data.frame(Measured = train_l[[ii]][,var_l[[z]]],
+                              Predicted = c(predict(
+                     out_l[[ii]][[xx]][[z]],
+                     newdata = 
+                       train_l[[ii]],
+                     ncomp = min.Abs[[ii]][[xx]][[z]])),
+                   Residuals = as.data.frame(out_l[[ii]][[xx]][[z]]$residuals)[,min.Abs[[ii]][[xx]][[z]]]
+                     )
+                 ))
+  }
+
+### --------------------------------------------------- ##
+## ------------------------------ ##
+## LOO-CV RMSE dataframes
+
+LOOCV_train_l <- vector("list", length(train_l))
+
+# Ignore row.names warning()
+for(ii in 1:length(train_l)){
+ LOOCV_train_l[[ii]] <- lapply(1:length(out_l[[ii]]),
+                        function(xx)
+                          lapply(1:length(out_l[[ii]][[xx]]),
+                               function (z)
+                   data.frame(Measured = train_l[[ii]][,var_l[[z]]],
+                              Predicted = c(out_l[[ii]][[xx]][[z]]$validation$pred),
+                   Soil_property = c(var_l[[z]]),
+                                Type = c(type_df[[ii]]),
+                                Spc_matrix = c(spc_df[[xx]]),
+                   Ncomp = min.Abs[[ii]][[xx]][[z]],
+                   Field = train_l[[ii]]$Field
+                     )
+                 ))
+  }
+
+# Compute prediction metrics
+for (ii in 1:length(type_df)){
+  for (z in 1:length(spc_df)){
+    for (j in 1:length(var_l)){
+      LOOCV_train_l[[ii]][[z]][[j]] <-  LOOCV_train_l[[ii]][[z]][[j]] %>% 
+     mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd = sd(sqrt((Predicted-Measured)^2)),
+      CCC = c(epiR::epi.ccc(Predicted,Measured)$rho.c$est),
+      SD_M = sd(Measured),
+      Bias = round(mean(Predicted-Measured),2),
+      SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+      IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+        mutate(.,
+               RPIQ = signif((IQ/SEP),2),
+               RPD = signif((SD_M/RMSE),2))
+    }
+  }
+}
+
+```
+
+# Combining predictions
+
+# TESTING DATASET
+
+```{r, echo = F, warning=F}
+
+# ---------------------------
+# ---------------------------
+
+# NIRMIR model averaging
+NIRMIR_Pred_l <- vector("list", length(train_l))
+for (ii in 1:length(Pred_l)){
+  for (xx in 1:length(var_l)){
+    NIRMIR_Pred_l[[ii]][[xx]] <- cbind(
+      Pred_l[[ii]][[1]][[xx]][,c("Predicted")],
+      Pred_l[[ii]][[2]][[xx]][,c("Predicted")])                                 }
+}
+
+
+# TRAINING DATASET
+
+# NIRMIR model averaging
+NIRMIR_Pred_train_l <- vector("list", length(train_l))
+for (ii in 1:length(Pred_train_l)){
+  for (xx in 1:length(var_l)){
+    NIRMIR_Pred_train_l[[ii]][[xx]] <- cbind(
+      Pred_train_l[[ii]][[1]][[xx]][,c("Predicted")],
+      Pred_train_l[[ii]][[2]][[xx]][,c("Predicted")])                                 }
+}
+```
+
+# Forecomb object indexing
+
+```{r, echo = F, warning = F}
+
+# NIR MIR
+FORC_NIRMIR <- vector("list", length(train_l))
+for (ii in 1:length(Pred_train_l)){
+  for (xx in 1:length(var_l)){
+    FORC_NIRMIR[[ii]][[xx]] <- 
+      foreccomb(train_l[[ii]][,var_l[[xx]]],
+                NIRMIR_Pred_train_l[[ii]][[xx]],
+                #test_l[[ii]][,var_l[[xx]]],
+                newpreds = NIRMIR_Pred_l[[ii]][[xx]])
+  }
+}
+
+
+```
+
+# OLS Regression
+
+```{r, echo = F, warning = F}
+
+OLS_Results <- lapply(1:length(FORC_NIRMIR),
+                          function (z)
+                            lapply(1:length(var_l),
+                                   function (j)
+                                     comb_OLS(
+                                  FORC_NIRMIR[[z]][[j]])))
+
+
+```
+
+# Create dataframes for OLS result (forecomb_res objects)
+
+```{r, echo = F, warning = F}
+
+OLS_l_df <- lapply(1:length(OLS_Results),
+                        function(xx)
+                          lapply(1:length(OLS_Results[[xx]]),
+                               function (z)
+                                 data.frame(Measured = 
+                              test_l[[xx]][,var_l[[z]]],
+                                            Predicted = 
+                                OLS_Results[[xx]][[z]]$Forecasts_Test,
+                   Soil_property = c(
+                                  rep(
+                                    var_l[[z]],
+                                    nrow(test_l[[xx]]))),
+                                Type = c(rep(type_df[[xx]],
+                                           nrow(test_l[[xx]]))),
+                                Spc_matrix = c(rep("(V)NIRMIR",
+                                                   nrow(test_l[[xx]]))),
+                   Field = test_l[[xx]]$Field
+                                 )))
+
+
+
+for (ii in 1:length(OLS_l_df)){
+  for (z in 1:length(OLS_l_df[[ii]])){
+      OLS_l_df[[ii]][[z]] <-  OLS_l_df[[ii]][[z]] %>% 
+    mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd = sd(sqrt((Predicted-Measured)^2)),
+      CCC = c(rep(epiR::epi.ccc(Predicted,Measured)$rho.c$est,
+                     nrow(test_l[[ii]]))),
+      SD_M = sd(Measured),
+      Bias = round(mean(Predicted-Measured),2),
+      SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+      IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+        mutate(.,
+               RPIQ = signif((IQ/SEP),2),
+               RPD = signif((SD_M/RMSE),2))
+
+    }
+  }
+
+
+```
+
+# Merge NIR, MIR, NIRMIR dataframes in long format
+
+```{r, echo = F, warning = F}
+
+# Bind at any depth function
+depth <- function(this) ifelse(is.list(this), 1L + max(sapply(this, depth)), 0L)
+
+bind_at_any_depth <- function(l) {
+  if (depth(l) == 2) {
+    return(bind_rows(l))
+  } else {
+    l <- map_depth(l, depth(l) - 2, bind_rows)
+    bind_at_any_depth(l)
+  }
+}
+
+Pred_l_df_unnested = bind_at_any_depth(Pred_l)
+OLS_l_df_unnested = bind_at_any_depth(OLS_l_df)
+
+Compl_pred <- rbind(Pred_l_df_unnested,OLS_l_df_unnested)
+
+# Check frequency
+table(Compl_pred$Field)
+
+```
+
+# Create Figures 1--5
+
+```{r, echo = F, warning = F}
+
+# Plot predicted versus measured for each soil property
+cols <- c("Soil_property", "Type", "Spc_matrix", "Field")
+
+Compl_pred[cols] <- lapply(Compl_pred[cols], factor)
+
+glimpse(Compl_pred)
+
+# Only include NIR, MIR and NIRMIR within prediction plots
+Compl_pred <- Compl_pred[Compl_pred$Spc_matrix == "(V)NIR" |
+                           Compl_pred$Spc_matrix == "MIR" |
+                           Compl_pred$Spc_matrix == "(V)NIRMIR", ]
+
+# Fix order for facetting
+Compl_pred$Spc_matrix <- factor(Compl_pred$Spc_matrix, levels = c("(V)NIR", "MIR", "(V)NIRMIR"))
+
+Compl_pred$Type <- recode(Compl_pred$Type,
+                                 "Field" = "In-situ",
+                                "Unprocessed" = "Unprocessed",
+                                "Air-dried" = "Air-dried",
+                          "Ground" = "Milled")
+
+# Fix order facetting
+Compl_pred$Type <- factor(Compl_pred$Type, levels = c("In-situ", "Unprocessed", "Air-dried", "Milled"))
+
+var_labels <- c("Calcium / mg kg", "Carbon / %",
+                "pH", "K / mg kg)","P / mg kg",
+                "Clay / %")
+
+RMSE_lab <- c("(mg kg) :", "(%) :", "(-) :","(mg kg) :","(mg kg) :", "(%) :")
+
+
+# Subset to export  
+Exp_pred_soil <- Compl_pred[Compl_pred$Soil_property != "CALCIUM",] # Exclude calcium
+Exp_pred_soil <- Exp_pred_soil[Exp_pred_soil$Type == "Milled",]
+Exp_pred_soil <- Exp_pred_soil[Exp_pred_soil$Spc_matrix == "(V)NIRMIR",]
+
+write.table(Exp_pred_soil,
+            "Local_pred.txt", col.names = T, row.names = F, sep = '\t')
+
+
+Compl_pred_soil <- lapply(1:length(var_l),
+                          function (z)
+                            Compl_pred[Compl_pred$Soil_property == var_l[[z]],])
+
+# Facet wrap approach, free scales
+FacetLims_list <-  lapply(1:length(Compl_pred_soil),
+                          function (z)
+                            Compl_pred_soil[[z]] %>%
+                                  group_by(.,Soil_property,Type,Spc_matrix) %>%
+                                  summarize(min = min(Measured, Predicted),
+                                            max = max(Measured, Predicted)) %>%
+                                  gather(.,range, Measured, -Soil_property,
+                                         -Type, -Spc_matrix) %>%
+                                  mutate(Predicted = Measured, range = NULL))
+
+# Rewrite limit for facet
+FacetLims_list[[5]][24,4] <- 80
+FacetLims_list[[5]][24,5] <- 80
+
+
+# Plotting
+GGpl_l_soil_property <- lapply(1:length(var_l),
+                               function (i) 
+                                 ggplot(Compl_pred_soil[[i]],
+                                             aes(Measured,Predicted))+
+                              geom_point()+
+                              geom_abline(intercept = 0, slope = 1)+
+                                xlab(paste('Measured', var_labels[[i]]))+
+                                ylab(paste('Predicted', var_labels[[i]]))+
+                                facet_grid(Type~Spc_matrix)+
+                                geom_blank(data = FacetLims_list[[i]])+
+                                geom_text(x = -Inf, y = Inf, 
+                                        label = paste("RMSE ",RMSE_lab[i], 
+                                                      signif(Compl_pred_soil[[i]]$RMSE, 2)), 
+                                        parse = F, hjust = 0, vjust = 1.50, size = 3, color = "black")+
+                                geom_text(x = -Inf, y = Inf, 
+                                        label = paste("CCC :", 
+                                                      signif(Compl_pred_soil[[i]]$CCC, 2)), 
+                                        parse = F, hjust = 0, vjust = 3.00, size = 3, color = "black")+
+                                geom_text(x = -Inf, y = Inf, 
+                                        label = paste("Bias :", 
+                                                      signif(Compl_pred_soil[[i]]$Bias, 2)), 
+                                        parse = F, hjust = 0, vjust = 4.25, size = 3, color = "black")+
+                                geom_text(x = -Inf, y = Inf, 
+                                        label = paste("RPIQ :", 
+                                                      signif(Compl_pred_soil[[i]]$RPIQ, 2)), 
+                                        parse = F, hjust = 0, vjust = 5.75, size = 3, color = "black"))
+
+
+# dir.create("Figures")
+for(i in 1:length(GGpl_l_soil_property)){
+  tiff(filename = paste("./Figures/Model_ave_pred_",var_l[[i]],".tif", sep = ""),
+      height = 7, width = 6, units = "in", pointsize = 1/400, res = 400)
+  print(GGpl_l_soil_property[[i]])
+  dev.off()
+  }
+
+
+
+
+```
+
+# CCC vs. RPIQ
+
+```{r, echo = F, warning = F}
+
+do.call(rbind, Compl_pred_soil) %>%
+  filter(.,
+         Soil_property != "CALCIUM") %>% 
+  ggplot(aes(x = CCC, y = RPIQ, col = Soil_property))+
+  geom_point()+
+  geom_line()+
+  xlab("CCC / (-)")+
+  ylab("RPIQ / (-)")+
+  labs(col="Soil property")
+
+
+```
+
+# Graphical abstract
+
+```{r, echo = F, warning = F}
+
+# Subset VNIRMIR data
+subDF <- Compl_pred[Compl_pred$Spc_matrix == "(V)NIRMIR",]
+
+# Split based on subsetted typed
+splsubDF <- split(subDF, subDF$Type)
+
+# Group and summarize
+sumsplsubDF <- lapply(splsubDF,
+                      function (x) {
+                        x %>% 
+                        group_by(.,Soil_property) %>% 
+                        summarise(RMSE = mean(RMSE),
+                                  RPIQ = mean(RPIQ),
+                                  Bias = mean(Bias))
+                        }
+                      )
+
+# Check prediction metrics MIR
+for (i in 1:length(sumsplsubDF)){
+  sumsplsubDF[[i]]$RPIQ_ratio <- sumsplsubDF[[i]]$RPIQ/sumsplsubDF[[4]]$RPIQ
+  print(splsubDF[[i]]$Type[1])
+  print(sumsplsubDF[[i]])
+  
+}
+
+# Read prediction metrics from spectral libraries
+subF4 <- read.table("RPIQRMSE_spiked.txt",
+                    header = T, sep = '\t')
+
+# Make df for plotting
+subDF2 <- subDF %>% 
+  select(., Soil_property, Type, RMSE, RPIQ, Bias) %>% 
+  setNames(., c("Soil_property","Dataset","RMSE","RPIQ","Bias")) %>% 
+  filter(Soil_property != "CALCIUM") %>% 
+  mutate(.,
+         Soil_property = recode(Soil_property,
+                                CARBON = "Carbon (%)",
+                                PH = "pH",
+                                CLAY = "Clay (%)",
+                                K_NITRATE = "K (mg/kg)",
+                                P_OLSEN = "P (mg/kg)"),
+         Dataset = recode(Dataset,
+                       "In-situ" = "FD (In-situ)",
+                       Unprocessed = "FD (Unprocessed)",
+                       "Air-dried" = "FD (Air-dried)",
+                       Milled = "FD (Milled)")) %>%
+  bind_rows(.,subF4) %>% 
+  group_by(Soil_property, Dataset) %>% 
+  summarise(n = sum(RMSE),
+            m = sum(RPIQ),
+            z = abs(sum(Bias))) %>%
+  mutate("RMSE (V)NIRMIR predictions" = n / sum(n),
+         "RPIQ (V)NIRMIR predictions" = m / sum(m),
+         "Bias (V)NIRMIR predictions" = z / sum(z)) %>% 
+  gather(.,
+         key = "key",
+         value = "percentage",
+         -Soil_property, -Dataset, -n, -m, -z)
+
+# Rewrite factor levels
+subDF2$Dataset <- factor(subDF2$Dataset,
+                         levels(factor(subDF2$Dataset))[c(1,2,3,5,8,6,7,4)])
+
+# png(filename = "./Figurs/Graphical_abstract.png", 
+#     units = "in", width = 12, height = 4, res = 400)
+subDF2 %>% 
+  mutate(.,
+         Soil_property = recode(Soil_property,
+                                "Carbon (%)" = "SOC",
+                                "pH" = "pH",
+                                "K (mg/kg)" = "KExch",
+                                "P (mg/kg)" = "POlsen",
+                                "Clay (%)" = "Clay")) %>%
+  #filter(Dataset != "Field-scale (Milled)") %>% 
+  ggplot(., aes(x = Soil_property, y = percentage, 
+                fill = Dataset, group = Dataset))+
+  geom_area(alpha = 0.6, size = 1, color = "black")+
+  facet_grid(~key)+
+  ylab("%")+
+  coord_cartesian(expand = FALSE)+
+  scale_y_continuous(limits = c(0,1))+
+  xlab(NULL)+
+  theme(text = element_text(size = 14),
+        panel.spacing.x = unit(2.5, "lines"),
+        strip.text.x  = element_text(size = 14))+
+  scale_fill_manual(values = c("slategray1",
+                               "orange",
+                               "forestgreen",
+                               "lemonchiffon",
+                               "lightcoral",
+                               "darkorchid",
+                               "burlywood4",
+                               "turquoise4"))
+# dev.off()
+
+```
+

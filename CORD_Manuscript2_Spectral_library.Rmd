@@ -1,0 +1,1889 @@
+# Breure et al. (2022)
+# Comparing the effect of different sample conditions ... 
+# Soil and Tillage research
+# https://doi.org/10.1016/j.still.2021.105196
+
+# NOTE:
+# Restrictions apply to the availability of these data, which were used under license for this study. 
+# Therefore, this script is not accompanied with data
+# For enquiries about data availability contact nsridata@cranfield.ac.uk.
+
+# Script for spectral library analysis
+
+# Read and pre-process NSI Dataset
+
+```{r, echo = F, warning = F}
+
+gc()
+rm(list = ls())
+
+gc()
+memory.size(max = 12500) # Increase memory limit to allow for large number of pls objects
+
+theme_set(theme_bw())
+
+# ------------------------ R Libaries -----------------------------
+# -----------------------------------------------------------------
+
+library(tidyverse)
+library(prospectr)
+library(resemble)
+library(readxl)
+library(broom)
+library(kableExtra)
+library(psych)
+library(parallelMap)
+library(parallel)
+library(pls)
+library(GeomComb)
+library(gridExtra)
+
+# Set working directory
+setwd("C:/Users/breur005/OneDrive - Wageningen University & Research/Rothamsted/Manuscript_2/NSI_NIR_SPECTRA")
+
+# Reading in Local library field level data
+
+# Set seed
+set.seed(123)
+
+theme_set(theme_bw())
+
+# WET CHEMISTRY -----------------------------------------------------------
+
+WetCh_nm <- list("Wet_Chem_P", "Wet_Chem_ST", "Wet_Chem_T2", "Wet_Chem_K6")
+
+WetCh_l <- lapply(1:length(WetCh_nm),
+                  function (z)
+                    read.table(paste(WetCh_nm[[z]],
+                                     ".txt",
+                                     sep = ""),
+                               header = T,
+                               sep = '\t'))
+
+SubCh_l <- vector("list",length  = length(WetCh_l))
+
+for(i in 1:length(WetCh_l)){
+  SubCh_l[[i]] <- WetCh_l[[i]] %>% 
+    dplyr::select(.,
+                  ID = ID,
+                  "CALCIUM" = M_Ca,
+                  "MAGNESIUM" = M_Mg,
+                  "SODIUM" = M_Na,
+                  "SULPHUR" = M_S,
+                  "CARBON" = M_C,
+                  "PH" = pH,
+                  "P_OLSEN" = PO4_ppm,
+                  "K_NITRATE" = M_K,
+                  "CLAY" = Clay_perc9,
+                  "SAND" = Sand_perc,
+                  "SILT" = Silt_perc9) 
+}
+
+
+```
+
+# Data selection for spectroscopy measurements
+# Merge with NSI samples present within Archive (i.e. from which there is sufficient sample left to take spectroscopy measurements)
+
+```{r, echo = FALSE, warning = FALSE}
+
+# Read data and re-organize
+Strat <- read_xlsx("2Soiltypes_NSI_points.xlsx")
+Grid <- read_xlsx("Regional_grid_Cambridgeshire_Fens_v3.xlsx")
+Diss <- read.table("NSI_selection_Cosine_D1_47NN.txt", header = T, sep = '\t')
+Arch <- read.delim("NSI_present_archive.csv", header = T, sep = ',')
+
+NSI_Chem <- read.table("NSI_Chem.txt", header = T, sep= '\t')
+
+names(Grid)[names(Grid) == "NSI_ID"] <- "ID"
+
+Strat <- Strat[,c("ID")]
+Diss$ID <- as.factor(Diss$ID)
+Diss <- as.data.frame(Diss[,c("ID")])
+names(Diss) <- c("ID")
+Grid <- Grid[,c("ID")]
+
+Strat$ID <- as.factor(Strat$ID)
+Grid$ID <- as.factor(Grid$ID)
+
+Strat$Field = c("Stratification")
+Grid$Field = c("Grid")
+Diss$Field = c("Dissimilarity")
+
+names(Arch)[names(Arch) == "NSI_ID"] <- "ID"
+Arch <- merge(Arch,NSI_Chem[,c("ID","K_NITRATE")], by = c("ID"))
+Arch <- Arch[,c("ID","Bottle","Box","Comment","CA_ACID","CARBON","PH","CLAY","P_OLSEN","K_NITRATE")]
+Arch$ID <- as.factor(Arch$ID)
+Arch$Field <- c("Archive")
+
+Arch[Arch == 0] <- NA
+
+# For each dataset
+list_df <- list(Strat,Grid,Diss)
+
+for(i in 1:length(list_df)){
+  print(dim(list_df[[i]]))
+  }
+
+for(i in 1:length(list_df)){
+  list_df[[i]] <- merge(list_df[[i]],Arch, by = c("ID"))
+  list_df[[i]] <- list_df[[i]][,c("Bottle","CA_ACID","CARBON","PH",
+                                  "CLAY","P_OLSEN","K_NITRATE")]
+  list_df[[i]] <- list_df[[i]] %>% 
+    mutate_all(.,
+               function (x)
+                 as.numeric(as.character(x)))
+  names(list_df[[i]]) <- c("Bottle","CALCIUM","CARBON","PH",
+                                  "CLAY","P_OLSEN","K_NITRATE")
+  }
+
+names(list_df) <- c("Stratification","Grid","Cosine dissimilarity")
+
+
+# For all datasets combined and their unique IDs
+Rbind_all <- rbind(Strat,
+                   rbind(Grid, Diss))
+
+Rbind_unique <- Rbind_all[match(unique(Rbind_all$ID),Rbind_all$ID),]
+
+Merge_Archive <- merge(Rbind_unique,Arch, by = c("ID"))
+
+# Check whether any sample are missing
+Missing <- subset(Rbind_unique, !(Rbind_unique$ID %in% Arch$ID))
+
+Merge_WetChem <- merge(Missing,
+                       NSI_Chem[,c("ID","CA_ACID","CARBON","PH","CLAY",
+                                   "P_OLSEN","K_NITRATE")]) 
+
+test = read_xlsx("11_03_2020_Archive_samples.xlsx")
+
+# Check which dataset these are present
+sub1 <- subset(Strat, (Strat$ID %in% Missing$ID))
+sub2 <- subset(Grid, (Grid$ID %in% Missing$ID))
+sub3 <- subset(Diss, (Diss$ID %in% Missing$ID))
+
+
+```
+
+# Reading spectra
+
+```{r, echo = FALSE, warning = FALSE}
+
+# Processing spectra regional datasets
+
+MIR_NSI <- read.table("MIR_NSI_Fens.txt", header = T,
+                      sep = '\t', check.names = F)
+
+NIR_NSI <- read.table("NIR_NSI_Fens.txt", header = T,
+                      sep = '\t', check.names = F)
+
+
+Spc_sub <- function (df, initialcol){
+  spc <- as.matrix(df[,initialcol:ncol(df)])
+  df <- as.data.frame(df[,-c(initialcol:ncol(df))])
+  df$spc <- spc
+  return(df)
+  }
+
+
+MIR_NSI_df <- Spc_sub(MIR_NSI, 2)
+NIR_NSI_df <- Spc_sub(NIR_NSI, 2)
+
+
+
+# Spectral processing NIR
+
+# First convert wavenumber to wavelength for Tensor II NIR spectra
+colnames(NIR_NSI_df$spc) <-   round(10000000/as.numeric(colnames(NIR_NSI_df$spc)),1)
+
+Spc_proc <- function(df, sindex){
+  df$sg <- prospectr::savitzkyGolay(df$spc, p = 3, w = 11, m = 0)
+  df$snv <- prospectr::standardNormalVariate(X = df$sg)
+  df$d1 <- t(diff(t(df$sg), differences = 1))
+  df$d2 <- t(diff(t(df$sg), differences = 2))
+  df$gapD1 <- gapDer(X = df$sg, m = 1, w = 11, s = sindex)
+  return(df)
+}
+
+MIR_NSI_df <- Spc_proc(MIR_NSI_df, 8)
+NIR_NSI_df <- Spc_proc(NIR_NSI_df, 31)
+
+removebands <- function(df,uplim,lolim){
+  df$sg <- df$sg[,c((colnames(df$sg) > uplim | colnames(df$sg) < lolim))]
+  df$snv <- df$snv[,c((colnames(df$snv) > uplim | colnames(df$snv) < lolim))]
+  df$d1 <- df$d1[,c((colnames(df$d1) > uplim | colnames(df$d1) < lolim))]
+  df$d2 <- df$d2[,c((colnames(df$d2) > uplim | colnames(df$d2) < lolim))]
+  df$gapD1 <- df$gapD1[,c((colnames(df$gapD1) > uplim | colnames(df$gapD1) < lolim))]
+  return(df)
+}
+
+MIR_NSI_df <- removebands(MIR_NSI_df,
+                          2430,2260)
+
+NIR_NSI_df <- removebands(NIR_NSI_df,
+                          1460,1265) # h = 7900, l =  6849
+
+NIR_NSI_df <- removebands(NIR_NSI_df,
+                          1960,1789) # h = 5587, l = 5102
+
+names(MIR_NSI_df)[1] <- c("Bottle")
+names(NIR_NSI_df)[1] <- c("Bottle")
+
+names(NIR_NSI_df)[names(NIR_NSI_df) == 'snv'] <- 'snvNIR'
+names(NIR_NSI_df)[names(NIR_NSI_df) == 'gapD1'] <- 'gapD1NIR'
+
+Spc_NSI_df <- merge(MIR_NSI_df, NIR_NSI_df[,c("Bottle",
+                                              "snvNIR",
+                                              "gapD1NIR")],
+                    by = c("Bottle"))
+
+Spc_NSI_df$d1_merg <- cbind(Spc_NSI_df$gapD1NIR,Spc_NSI_df$gapD1)
+Spc_NSI_df$snv_merg <- cbind(Spc_NSI_df$snvNIR,Spc_NSI_df$snv)
+
+NSI_df <- vector("list", length(list_df))
+for (i in 1:length(list_df)){
+    NSI_df[[i]] <- merge(list_df[[i]],Spc_NSI_df[,c("Bottle",
+                                                    "snv",
+                                                    "gapD1",
+                                                    "snvNIR",
+                                                    "gapD1NIR",
+                                                    "snv_merg",
+                                                    "d1_merg")],
+                         by = c("Bottle"))  
+    }
+
+
+for (i in 1:length(NSI_df)){
+  print(dim(NSI_df[[i]]))
+}
+
+#
+Check_unique_samples <- rbind(NSI_df[[1]],
+                   NSI_df[[2]])
+
+Unique_samples <- Check_unique_samples[match(unique(Check_unique_samples$Bottle),
+                                  Check_unique_samples$Bottle),]
+
+```
+
+
+# Scatterplot matrics of wet chemistry for each method
+# For the dataset where the selection is merged with NIR MIR spectra
+
+```{r, echo = F, warning = F}
+# rewrite the selected NSI dataframes with correct spectra!!
+
+# Write variables to predict
+var_l <- c("CALCIUM","CARBON","PH","CLAY", "P_OLSEN","K_NITRATE")
+
+psych::pairs.panels(NSI_df[[1]][,c(var_l)], smooth = TRUE,ellipses = FALSE, hist.col = "grey")
+psych::pairs.panels(NSI_df[[2]][,var_l],ellipses = FALSE, hist.col = "grey")
+psych::pairs.panels(NSI_df[[3]][,var_l],ellipses = FALSE, hist.col = "grey")
+
+```
+
+# Reading and processing spectra MIR NIR local dataset
+
+```{r, echo=F,warning=F}
+Local_Spc <- list(c("GR_MIR.txt", "GR_MIR_ST.txt",
+                 "GR_MIR_T2.txt","GR_MIR_K6.txt"),
+                  c("GR_NIR.txt", "GR_NIR_ST.txt",
+                 "GR_NIR_T2.txt","GR_NIR_K6.txt"))
+
+Local_df <- lapply(1:length(Local_Spc),
+                      function (x)
+                        lapply(1:length(Local_Spc[[x]]),
+                               function (z)
+                      read.table(Local_Spc[[x]][[z]],
+                                 header = T, sep = '\t',
+                                 check.names = F)))
+
+Local_df <- lapply(1:length(Local_df),
+                   function (x)
+                     lapply(1:length(Local_df[[x]]),
+                            function (z)
+                              Spc_sub(Local_df[[x]][[z]],
+                                      8)))
+
+# Convert wavenumber to wavelength
+for (i in 1:length(Local_df[[2]])){
+colnames(Local_df[[2]][[i]]$spc) <-   round(10000000/as.numeric(colnames(Local_df[[2]][[i]]$spc)),1)
+}
+
+# MIR processing
+Local_df[[1]] <- lapply(1:length(Local_df[[1]]),
+                       function (z)
+                         Spc_proc(Local_df[[1]][[z]], 8))
+
+# NIR processing
+Local_df[[2]] <- lapply(1:length(Local_df[[2]]),
+                       function (z)
+                         Spc_proc(Local_df[[2]][[z]], 31))
+
+# Remove bands; different wavenumber/length ranges depending on sensor
+Local_df[[1]] <- lapply(1:length(Local_df[[1]]),
+                           function (z)
+                             removebands(Local_df[[1]][[z]],
+                                         2430,2260))
+
+# NIR band removal
+Local_df[[2]] <- lapply(1:length(Local_df[[2]]),
+                           function (z)
+                             removebands(Local_df[[2]][[z]],
+                                         1460,1265)) # h = 7900, l =  6849
+
+Local_df[[2]] <- lapply(1:length(Local_df[[2]]),
+                           function (z)
+                             removebands(Local_df[[2]][[z]],
+                                         1960,1789)) # h = 5587, l = 5102
+
+# Rename nested spectra data.frames
+for (i in 1:length(Local_df[[2]])){
+  names(Local_df[[2]][[i]])[names(Local_df[[2]][[i]]) == 'snv'] <- 'snvNIR'
+  names(Local_df[[2]][[i]])[names(Local_df[[2]][[i]]) == 'gapD1'] <- 'gapD1NIR'
+}
+
+
+# Merge data with wet chemistry
+Local_merg <- lapply(1:length(Local_df),
+                     function (z)
+                       lapply(1:length(Local_df[[z]]),
+                              function (x)
+                                merge(SubCh_l[[x]],
+                                      Local_df[[z]][[x]],
+                                      by = c("ID"))))
+
+# Create long data frame
+Merg_df <- lapply(1:length(Local_merg),
+                  function (x)
+                    do.call(rbind, Local_merg[[x]]))
+
+# Merge
+L_NIRMIR <- merge(Merg_df[[1]],
+                  Merg_df[[2]][,c("ID","Field",
+                                     "snvNIR","gapD1NIR")],
+                  by = c("ID","Field"))
+
+# Bind NIR and MIR data for snv and gap derivative
+L_NIRMIR$d1_merg <- cbind(L_NIRMIR$gapD1NIR,L_NIRMIR$gapD1)
+L_NIRMIR$snv_merg <- cbind(L_NIRMIR$snvNIR, L_NIRMIR$snv)
+
+# Read in subset of train / test set
+# Subset L_NIRMIR based on ID and Field columns
+train_ID <- read.table("train_ID.txt", 
+                       header = T, sep = '\t')
+test_ID <- read.table("test_ID.txt", 
+                      header = T, sep = '\t')
+
+train_df <- L_NIRMIR[interaction(L_NIRMIR[,c("ID","Field")]) %in% interaction(train_ID[,c("ID","Field")]),]
+
+test_df <- L_NIRMIR[interaction(L_NIRMIR[,c("ID","Field")]) %in% interaction(test_ID[,c("ID","Field")]),]
+
+# Describe the field-scale dataset
+psych::describe(rbind(train_df[,var_l], test_df[,var_l]))
+
+# Describe the calibration dataset
+psych::describe(train_df[,var_l])
+
+# Describe the validation dataset
+psych::describe(test_df[,var_l])
+
+```
+
+# PLS models for the NSI datasets
+# Select number of components based on lowest RMSE on local dataset
+
+```{r, echo = FALSE, warning = FALSE}
+
+# Change to include only stratified and regional library
+NSI_df_long <- rep(NSI_df[1:2], each = length(var_l))
+
+var_ll <- rep(var_l, length(NSI_df[1:2]))
+
+NSI_df_long2 <- lapply(1:length(NSI_df_long),
+                       function (z)
+                         NSI_df_long[[z]][complete.cases(NSI_df_long[[z]][,c(var_ll[[z]])]),])
+
+# Check whether 0 values have been replaced!
+for (i in 1:length(NSI_df_long2[[1]])){
+  print(dim(NSI_df_long2[[1]][[i]]))
+}
+
+# Duplicate list in order to remove different observations from NIR and MIR dataframes
+NSI_df_long2 <- list(NSI_df_long2, NSI_df_long2)
+
+# Changed the log sequence
+log_seq <- c(1,2,5,6,7,8,11,12)
+NSI_df_long2_log <- NSI_df_long2
+
+for (x in 1:length(NSI_df_long2_log)){
+  for (i in log_seq){
+  NSI_df_long2_log[[x]][[i]][,c(var_ll[[i]])] <- log(NSI_df_long2_log[[x]][[i]][,c(var_ll[[i]])]) 
+}
+}
+ 
+# Describe Datasets:
+psych::describe(NSI_df_long2[[1]][[1]][,var_l])
+psych::describe(NSI_df_long2[[1]][[11]][,var_l])
+
+```
+
+# PLS models for NIR data
+
+```{r, echo = F, warning = F}
+
+parallelStartSocket(parallel::detectCores())
+
+spc_matrix_l <- c("gapD1NIR", "gapD1")
+
+# PLS regression
+PLS_mods1 <- lapply(1:length(spc_matrix_l),
+                   function (x)
+                     lapply(1:length(NSI_df_long2[[x]]),
+                            function (z)
+                              plsr(as.formula(paste(var_ll[[z]],"~",as.name(spc_matrix_l[[x]]))), 
+                                     scale = FALSE, trace = TRUE, 
+                                     data = NSI_df_long2[[x]][[z]], ncomp = 15, 
+                                     validation = "LOO")
+                              ))
+
+# Set names for pls objects
+mod_names <- rep(names(list_df[1:2]), each = length(var_l)) 
+
+for (i in 1:length(PLS_mods1)){
+  names(PLS_mods1[[i]]) <- c(paste(mod_names, var_ll))
+}
+
+# Plot RMSE as a function of nr of components
+par(mfrow = c(2,3))
+RMSE_Plot = lapply(1:length(PLS_mods1), 
+                  function (x)
+                    lapply(1:length(PLS_mods1[[x]]),
+                           function (z)
+                    plot(RMSEP(PLS_mods1[[x]][[z]], 
+                               estimate = c("CV")),
+                                        main = names(PLS_mods1[[x]][z]),
+                         col = "blue", lty = 3)))
+
+# Predictions list
+pred_list <- lapply(1:length(PLS_mods1),
+                    function (i)
+                      lapply(1:length(PLS_mods1[[i]]),
+                             function (q)
+                      data.frame(predict(PLS_mods1[[i]][[q]], 
+                              newdata = L_NIRMIR))))
+
+# Absolute minimum in RMSE of LOO-CV
+minRMSE <- vector("list", length(PLS_mods1))
+
+for (i in 1:length(minRMSE)){
+  tempRMSE <- lapply(1:length(PLS_mods1[[i]]),
+                            function (s)
+                     which.min(
+                      as.data.frame(
+                        RMSEP(PLS_mods1[[i]][[s]])$val)[1,2:16]))
+  tempRMSE <- ifelse(tempRMSE == 0, 1, tempRMSE)
+  tempRMSE <- ifelse(tempRMSE == "NA", 1, tempRMSE)
+  minRMSE[[i]] <- tempRMSE
+  }
+
+# Re-code predictions into a neat data frame
+Pred_cal <- lapply(1:length(PLS_mods1),
+                   function (z)
+                     lapply(1:length(PLS_mods1[[z]]),
+                            function (s)
+                     data.frame(Measured = test_df[,c(var_ll[[s]])],
+                                Predicted = as.vector(predict(PLS_mods1[[z]][[s]],
+                                                    newdata = test_df,
+                                                    ncomp = minRMSE[[z]][[s]])),
+                                Soil_property = c(var_ll[[s]]),
+                                Spc_matrix = c(spc_matrix_l[[z]]),
+                                Dataset = c(mod_names[[s]]),
+                                Field = test_df$Field
+                                )
+                   ))
+
+
+# Compute prediction metrics
+for(i in 1:length(Pred_cal)) {
+  for (j in 1:length(Pred_cal[[i]])){
+            Pred_cal[[i]][[j]] <- Pred_cal[[i]][[j]] %>% 
+                     mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd2 = sd(sqrt((Predicted-Measured)^2)),
+            Mean_P = mean(Predicted),
+            SD_P = sd(Predicted),
+            n = n(),
+            Range_P = max(Predicted)-min(Predicted),
+            Mean_M = mean(Measured),
+            SD_M = sd(Measured),
+            Range_M = max(Measured)-min(Measured),
+           CCC = round(epiR::epi.ccc(Predicted,Measured)$rho.c$est,2),
+           Bias = round(mean(Predicted-Measured),2),
+           SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+           IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+                     mutate(.,
+                            RPIQ = signif((IQ/SEP),2),
+                            RPD = signif((SD_M/RMSE),2))
+  }
+}
+
+# Create long data frame
+Pred_df1 <- lapply(1:length(Pred_cal),
+                   function (x)
+                     do.call(rbind, Pred_cal[[x]]))
+
+# Subset to exclude calcium
+Pred_df1 <- lapply(1:length(Pred_df1),
+                   function (x)
+                     Pred_df1[[x]][Pred_df1[[x]]$Soil_property != "CALCIUM",])
+
+
+
+```
+
+# NIRMIR model averaging
+
+# TESTING DATASET
+
+```{r, echo = F, warning=F}
+
+# NIRMIR model averaging
+NIRMIR_Pred_l <- vector("list", length(NSI_df_long2[[1]]))
+for (xx in 1:length(Pred_cal[[1]])){
+    NIRMIR_Pred_l[[xx]] <- cbind(
+      Pred_cal[[1]][[xx]][,c("Predicted")],
+      Pred_cal[[2]][[xx]][,c("Predicted")])                                 
+    }
+
+
+
+# TRAINING DATASET
+
+# NIRMIR model averaging
+NIRMIR_Pred_train_l <- vector("list", length(NSI_df_long2[[1]]))
+for (xx in 1:length(NSI_df_long2[[1]])){
+    NIRMIR_Pred_train_l[[xx]] <- cbind(
+      as.vector(predict(PLS_mods1[[1]][[xx]],
+                        newdata = NSI_df_long2[[1]][[xx]],
+                        ncomp = minRMSE[[1]][[xx]])),
+      as.vector(predict(PLS_mods1[[2]][[xx]],
+                        newdata = NSI_df_long2[[1]][[xx]],
+                        ncomp = minRMSE[[2]][[xx]])))                                 
+    }
+
+```
+
+# Forecomb object indexing
+
+```{r, echo = F, warning = F}
+# NIR MIR
+FORC_NIRMIR <- vector("list", length(NSI_df_long2[[1]]))
+for (xx in 1:length(NSI_df_long2[[1]])){
+    FORC_NIRMIR[[xx]] <- 
+      foreccomb(NSI_df_long2[[1]][[xx]][,var_ll[[xx]]],
+                NIRMIR_Pred_train_l[[xx]],
+                #test_l[[ii]][,var_l[[xx]]],
+                newpreds = NIRMIR_Pred_l[[xx]])
+  }
+
+```
+
+# OLS Regression
+
+```{r, echo = F, warning = F}
+
+OLS_Results <- lapply(1:length(FORC_NIRMIR),
+                          function (z)
+                             comb_OLS(FORC_NIRMIR[[z]]))
+
+```
+
+# Create dataframes for OLS result (forecomb_res objects)
+
+```{r, echo = F, warning = F}
+
+OLS_l_df <- lapply(1:length(OLS_Results),
+                        function(xx)
+                           data.frame(Measured = test_df[,var_ll[[xx]]],
+                                      Predicted = OLS_Results[[xx]]$Forecasts_Test,
+                   Soil_property = c(var_ll[[xx]]),
+                   Spc_matrix = c("(V)NIRMIR"),
+                   Dataset = c(mod_names[[xx]]),
+                   Field = test_df$Field
+                                 ))
+
+# Compute prediction metrics
+for (ii in 1:length(OLS_l_df)){
+    OLS_l_df[[ii]] <-  OLS_l_df[[ii]] %>% 
+    mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd = sd(sqrt((Predicted-Measured)^2)),
+      CCC = c(rep(epiR::epi.ccc(Predicted,Measured)$rho.c$est,
+                     nrow(test_df))),
+      SD_M = sd(Measured),
+      Bias = round(mean(Predicted-Measured),2),
+      SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+      IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+        mutate(.,
+               RPIQ = signif((IQ/SEP),2),
+               RPD = signif((SD_M/RMSE),2))
+
+    }
+
+# Create long data frame
+NIRMIR_pred <- do.call(rbind, OLS_l_df)
+
+# Exclude calcium
+NIRMIR_pred <- NIRMIR_pred[NIRMIR_pred$Soil_property != "CALCIUM",]
+
+# Facet limits
+facetlims = NIRMIR_pred %>% 
+  group_by(Dataset, Soil_property) %>% 
+  summarize(min = min(Measured, Predicted),
+            max = max(Measured, Predicted)) %>% 
+  gather(range, Measured, -Soil_property, -Dataset) %>% 
+  mutate(Predicted = Measured, range = NULL)
+
+```
+
+
+# Check residuals Regional dataset (spectral libraries) 
+
+```{r, echo = F, warning = F}
+
+# Write residuals to list
+t_l3 <- lapply(1:length(PLS_mods1), 
+               function (x)
+                 lapply(1:length(PLS_mods1[[x]]),
+                        function (z)
+                 data.frame(PLS_mods1[[x]][[z]]$residuals)[,minRMSE[[x]][[z]]]))
+
+# Check dimensions
+for (i in 1:length(NSI_df_long2[[1]])){
+  print(dim(NSI_df_long2[[1]][[i]]))
+}
+
+# Add sample IDs
+t_l4 <- lapply(1:length(PLS_mods1),
+               function (x)
+                 lapply(1:length(NSI_df_long2[[x]]),
+                        function (z)
+                 data.frame(Bottle = NSI_df_long2[[x]][[z]]$Bottle,
+                               Res = scale(t_l3[[x]][[z]])))) # Scaled
+
+des_fit3_l <- vector("list", length(PLS_mods1))
+
+for (i in 1:length(des_fit3_l)){
+  # Description of residuals for each model
+  des_fit3 = ""
+  for (j in seq(1:length(t_l3))){
+    ds <- as.data.frame(psych::describe(t_l3[[i]][[j]]))
+    des_fit3 <- rbind(des_fit3, ds)
+    }
+  
+  des_fit3 = data.frame(apply(des_fit3[2:nrow(des_fit3),],2,as.numeric))
+  des_fit3_l[[i]] <- des_fit3
+  
+  }
+
+# Function to store ggplot() objects in list with skewness coefficient annotated in plot
+
+# Standardised residuals
+for (i in 1:length(spc_matrix_l)){
+
+  plot_tl3 <- lapply(1:length(t_l3[[i]]), function (x) ggplot()+
+                     geom_histogram(aes(scale((t_l3[[i]][[x]])),..density..), # scaled
+                                    color = "black",
+                                    fill = "white")+
+                     geom_text(aes(x = -Inf, y = Inf, 
+                                   hjust = 0, vjust = 1, 
+                                   label = paste("Skew =", signif(des_fit3[x,c("skew")],2))))+
+                     ggtitle(names(PLS_mods1[[i]][x]))+
+                     xlab("(-)"))
+
+  # Grid.arrange plot
+  seq_var_l <- as.list(split(c(1:length(var_ll)), 
+                             ceiling(seq_along(c(1:length(var_ll)))/length(var_l))))
+  
+  res_hist_l <- lapply(1:length(seq_var_l),
+                       function (z)
+                       grid.arrange(arrangeGrob(grobs = plot_tl3[c(seq_var_l[[z]])], 
+                                                ncol = 2, name = mod_names[[z]])))
+  }
+
+
+NSI_df_long2_res_ch <- NSI_df_long2[[1]]
+
+NSI_df_long2_res <- NSI_df_long2
+
+
+# Cut-off thresholds for standardized residuals
+min_c <- -3 
+max_c <- 3 
+
+# ------------------------------------------------
+for (i in 1:length(NSI_df_long2[[1]])){
+  # NIR subset
+  s1 = t_l4[[1]][[i]][t_l4[[1]][[i]]$Res > max_c, ] # NIR
+  s2 = t_l4[[1]][[i]][t_l4[[1]][[i]]$Res < min_c, ] # 
+  
+  tempsubNIR <- NSI_df_long2[[1]][[i]][!(NSI_df_long2[[1]][[i]]$Bottle %in% s1$Bottle),] # s1
+  tempsubNIR <- tempsubNIR[!(tempsubNIR$Bottle %in% s2$Bottle),] # s2
+  
+  NSI_df_long2_res[[1]][[i]] <- tempsubNIR
+  
+  s3 = t_l4[[2]][[i]][t_l4[[2]][[i]]$Res > max_c, ] # MIR
+  s4 = t_l4[[2]][[i]][t_l4[[2]][[i]]$Res < min_c, ] # 
+  
+  tempsubMIR <- NSI_df_long2[[2]][[i]][!(NSI_df_long2[[2]][[i]]$Bottle %in% s3$Bottle),] # s1
+  tempsubMIR <- tempsubMIR[!(tempsubMIR$Bottle %in% s4$Bottle),] # s2
+  
+  NSI_df_long2_res[[2]][[i]] <- tempsubMIR
+  
+  s_all <- do.call(rbind, list(s1,s2,s3,s4))
+  
+  NSI_df_long2_res_ch[[i]] <- NSI_df_long2[[1]][[i]][!(NSI_df_long2[[1]][[i]]$Bottle %in% s_all$Bottle),]
+  
+}
+
+
+# Check change in dimensions for each soil property and dataset
+for (i in 1:length(NSI_df_long2_res_ch)){
+  print(paste(mod_names[[i]], var_ll[[i]]))
+  
+  print(dim(NSI_df_long2[[1]][[i]])[1]-dim(NSI_df_long2_res[[1]][[i]])[1])
+  
+  print(dim(NSI_df_long2[[1]][[i]])[1]-dim(NSI_df_long2_res[[2]][[i]])[1])
+  
+  print(dim(NSI_df_long2[[1]][[i]])[1]- dim(NSI_df_long2_res_ch[[i]])[1])
+}
+
+
+for (i in 1:length(NSI_df_long2_res[[1]])){
+  print(dim(NSI_df_long2_res[[1]][[i]]))
+}
+
+```
+
+# Re-run PLS models with residuals checked and outliers removed based on 3SD of standardized residuals
+
+```{r, echo = F, warning = F}
+
+# setwd("D:/OneDrive - Rothamsted Research/Analysis/Calibration/Manuscript2B_plots_v4")
+
+# Index spectral matrices
+spc_matrix_l <- c("gapD1NIR", "gapD1")
+
+# Run PLS regressions
+PLS_mods2 <- lapply(1:length(spc_matrix_l),
+                   function (x)
+                     lapply(1:length(NSI_df_long2_res_ch),
+                            function (z)
+                              plsr(as.formula(paste(var_ll[[z]],"~",as.name(spc_matrix_l[[x]]))), 
+                                     scale = FALSE, trace = TRUE, 
+                                     data = NSI_df_long2_res[[x]][[z]], ncomp = 15, 
+                                     validation = "LOO")
+                              ))
+
+# Rename pls objects
+mod_names <- rep(names(list_df[1:2]), each = length(var_l))
+
+for (i in 1:length(PLS_mods2)){
+  names(PLS_mods2[[i]]) <- c(paste(mod_names, var_ll))
+}
+
+# Plot residuals as a function of nr components included
+par(mfrow = c(2,3))
+RMSE_Plot = lapply(1:length(PLS_mods2), 
+                  function (x)
+                    lapply(1:length(PLS_mods2[[x]]),
+                           function (z)
+                    plot(RMSEP(PLS_mods2[[x]][[z]], 
+                               estimate = c("CV")),
+                                        main = names(PLS_mods2[[x]][z]),
+                         col = "blue", lty = 3)))
+
+# Predictions list
+pred_list <- lapply(1:length(PLS_mods2),
+                    function (i)
+                      lapply(1:length(PLS_mods2[[i]]),
+                             function (q)
+                      data.frame(predict(PLS_mods2[[i]][[q]], 
+                              newdata = L_NIRMIR))))
+
+
+# Absolute minimum in RMSE of LOO-CV
+minRMSE <- vector("list", length(PLS_mods2))
+
+for (i in 1:length(minRMSE)){
+  tempRMSE <- lapply(1:length(PLS_mods2[[i]]),
+                            function (s)
+                     which.min(
+                      as.data.frame(
+                        RMSEP(PLS_mods2[[i]][[s]])$val)[1,2:16]))
+  tempRMSE <- ifelse(tempRMSE == 0, 1, tempRMSE)
+  tempRMSE <- ifelse(tempRMSE == "NA", 1, tempRMSE)
+  minRMSE[[i]] <- tempRMSE
+  }
+
+# Re-code predictions into a neat data frame
+Pred_cal <- lapply(1:length(PLS_mods2),
+                   function (z)
+                     lapply(1:length(PLS_mods2[[z]]),
+                            function (s)
+                     data.frame(Measured = test_df[,c(var_ll[[s]])],
+                                Predicted = as.vector(predict(PLS_mods2[[z]][[s]],
+                                                    newdata = test_df,
+                                                    ncomp = minRMSE[[z]][[s]])),
+                                Soil_property = c(var_ll[[s]]),
+                                Spc_matrix = c(spc_matrix_l[[z]]),
+                                Dataset = c(mod_names[[s]]),
+                                Field = test_df$Field
+                                )
+                   ))
+
+
+# Compute prediction metrics
+for(i in 1:length(Pred_cal)) {
+  for (j in 1:length(Pred_cal[[i]])){
+            Pred_cal[[i]][[j]] <- Pred_cal[[i]][[j]] %>% 
+                     mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd2 = sd(sqrt((Predicted-Measured)^2)),
+            Mean_P = mean(Predicted),
+            SD_P = sd(Predicted),
+            n = n(),
+            Range_P = max(Predicted)-min(Predicted),
+            Mean_M = mean(Measured),
+            SD_M = sd(Measured),
+            Range_M = max(Measured)-min(Measured),
+           CCC = round(epiR::epi.ccc(Predicted,Measured)$rho.c$est,2),
+           Bias = round(mean(Predicted-Measured),2),
+           SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+           IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+                     mutate(.,
+                            RPIQ = signif((IQ/SEP),2),
+                            RPD = signif((SD_M/RMSE),2))
+  }
+}
+
+# Create long data frame
+Pred_df2 <- lapply(1:length(Pred_cal),
+                   function (x)
+                     do.call(rbind, Pred_cal[[x]]))#
+
+# Exclude calcium
+Pred_df2 <- lapply(1:length(Pred_df2),
+                   function (x)
+                     Pred_df2[[x]][Pred_df2[[x]]$Soil_property != "CALCIUM",])
+
+
+```
+
+# NIRMIR model averaging
+
+# TESTING DATASET
+
+```{r, echo = F, warning=F}
+
+# NIRMIR model averaging
+NIRMIR_Pred_l <- vector("list", length(NSI_df_long2))
+for (xx in 1:length(Pred_cal[[1]])){
+    NIRMIR_Pred_l[[xx]] <- cbind(
+      Pred_cal[[1]][[xx]][,c("Predicted")],
+      Pred_cal[[2]][[xx]][,c("Predicted")])                                 
+    }
+
+# TRAINING DATASET
+
+# NIRMIR model averaging
+NIRMIR_Pred_train_l <- vector("list", length(NSI_df_long2_res_ch))
+for (xx in 1:length(NSI_df_long2_res_ch)){
+    NIRMIR_Pred_train_l[[xx]] <- cbind(
+      as.vector(predict(PLS_mods2[[1]][[xx]],
+                        newdata = NSI_df_long2_res_ch[[xx]],
+                        ncomp = minRMSE[[1]][[xx]])),
+      as.vector(predict(PLS_mods2[[2]][[xx]],
+                        newdata = NSI_df_long2_res_ch[[xx]],
+                        ncomp = minRMSE[[2]][[xx]])))                                 
+    }
+
+```
+
+# Forecomb object indexing
+
+```{r, echo = F, warning = F}
+
+# NIR MIR
+FORC_NIRMIR <- vector("list", length(NSI_df_long2_res_ch))
+for (xx in 1:length(NSI_df_long2_res_ch)){
+    FORC_NIRMIR[[xx]] <- 
+      foreccomb(NSI_df_long2_res_ch[[xx]][,var_ll[[xx]]],
+                NIRMIR_Pred_train_l[[xx]],
+                #test_l[[ii]][,var_l[[xx]]],
+                newpreds = NIRMIR_Pred_l[[xx]])
+  }
+
+```
+
+# OLS Regression
+
+```{r, echo = F, warning = F}
+
+OLS_Results <- lapply(1:length(FORC_NIRMIR),
+                          function (z)
+                             comb_OLS(FORC_NIRMIR[[z]]))
+
+```
+
+# Create dataframes for OLS result (forecomb_res objects)
+
+```{r, echo = F, warning = F}
+
+OLS_l_df <- lapply(1:length(OLS_Results),
+                        function(xx)
+                           data.frame(Measured = test_df[,var_ll[[xx]]],
+                                      Predicted = OLS_Results[[xx]]$Forecasts_Test,
+                   Soil_property = c(var_ll[[xx]]),
+                   Spc_matrix = c("(V)NIRMIR"),
+                   Dataset = c(mod_names[[xx]]),
+                   Field = test_df$Field
+                                 ))
+
+for (ii in 1:length(OLS_l_df)){
+    OLS_l_df[[ii]] <-  OLS_l_df[[ii]] %>% 
+    mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd = sd(sqrt((Predicted-Measured)^2)),
+      CCC = c(rep(epiR::epi.ccc(Predicted,Measured)$rho.c$est,
+                     nrow(test_df))),
+      SD_M = sd(Measured),
+      Bias = round(mean(Predicted-Measured),2),
+      SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+      IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+        mutate(.,
+               RPIQ = signif((IQ/SEP),2),
+               RPD = signif((SD_M/RMSE),2))
+
+    }
+
+# Create long data frame and exclude calcium
+Pred_df3 <- do.call(rbind, OLS_l_df)
+
+Pred_df3 <- Pred_df3[Pred_df3$Soil_property != "CALCIUM",]
+
+facetlims = Pred_df3 %>% 
+  group_by(Dataset, Soil_property) %>% 
+  summarize(min = min(Measured, Predicted),
+            max = max(Measured, Predicted)) %>% 
+  gather(range, Measured, -Soil_property, -Dataset) %>% 
+  mutate(Predicted = Measured, range = NULL)
+
+
+```
+
+# Compute PLS regression with spiking samples from local library
+
+```{r, echo = F, warning = F}
+
+# Kennard-stone sampling based on NIRMIR spectral matrix
+ken_euclid <- kenStone(X = train_df$d1_merg, 
+                      k = round(nrow(train_df)*0.1), 
+                      metric = "euclid")
+
+ken_mahal <- kenStone(X = train_df$d1_merg, 
+                      k = round(nrow(train_df)*0.1), 
+                      metric = "mahal",
+                      pc = 3)
+
+# Project to PCA
+PCA_var <- ortho_projection(Xr = train_df$d1_merg, # index to spectral dataframe 
+                                        pc_selection = list("cumvar", 0.99),
+                                        center = T, scaled = T,
+                                       method = "pca")
+
+plot(PCA_var)
+
+# Subset calibration set
+df_sub = train_df[ken_euclid$model,]
+
+# Subset to same variables as regional library
+names(df_sub)[names(df_sub) == "ID"] <- "Bottle"
+
+Spike_sb <- df_sub[,c(names(NSI_df_long2[[1]][[1]]))]
+psych::describe(Spike_sb[,c(var_l)])
+
+Sp_NSI_df <- lapply(1:length(NSI_df_long2),
+                    function (z)
+                      lapply(1:length(NSI_df_long2[[z]]),
+                             function (x)
+                             rbind(NSI_df_long2[[z]][[x]],
+                                   Spike_sb)))
+
+
+W_Sp_NSI_df <- lapply(1:length(NSI_df_long2),
+                    function (z)
+                      lapply(1:length(NSI_df_long2[[z]]),
+                             function (x)
+                               rbind(NSI_df_long2[[z]][[x]],
+                                     do.call(rbind, replicate(floor(
+                                       nrow(NSI_df_long2[[z]][[x]])/nrow(Spike_sb)),
+                                       Spike_sb,
+                                       simplify = F)))
+                    )
+                    )
+
+# Check dimensions of lists
+for (i in 1:length(W_Sp_NSI_df[[1]])){
+  print(dim(W_Sp_NSI_df[[1]][[i]]))
+}
+
+# Weighting
+n_weighting <- do.call(rbind, lapply(1:length(NSI_df_long2),
+                      function (z)
+                        lapply(1:length(NSI_df_long2[[z]]),
+                               function (x)
+                               floor(nrow(NSI_df_long2[[z]][[x]])/nrow(Spike_sb)))))
+
+n_weighting
+
+```
+
+# Weighted spiked PLS regressions
+
+```{r, echo = F, warning = F}
+
+# Index spectral matrices
+spc_matrix_l <- c("gapD1NIR", "gapD1")
+
+# Run PLS regressions
+PLS_mods3 <- lapply(1:length(spc_matrix_l),
+                   function (x)
+                     lapply(1:length(W_Sp_NSI_df[[x]]),
+                            function (z)
+                              plsr(as.formula(paste(var_ll[[z]],"~",as.name(spc_matrix_l[[x]]))), 
+                                     scale = FALSE, trace = TRUE, 
+                                     data = W_Sp_NSI_df[[x]][[z]], ncomp = 15, 
+                                     validation = "LOO")
+                              ))
+
+# Rename pls objects
+mod_names <- rep(names(list_df[1:2]), each = length(var_l))
+
+for (i in 1:length(PLS_mods3)){
+  names(PLS_mods3[[i]]) <- c(paste(mod_names, var_ll))
+}
+
+# Plot RMSE as a function of nr components included
+par(mfrow = c(2,3))
+RMSE_Plot = lapply(1:length(PLS_mods3), 
+                  function (x)
+                    lapply(1:length(PLS_mods3[[x]]),
+                           function (z)
+                    plot(RMSEP(PLS_mods3[[x]][[z]], 
+                               estimate = c("CV")),
+                                        main = names(PLS_mods3[[x]][z]),
+                         col = "blue", lty = 3)))
+
+# Predictions list
+pred_list <- lapply(1:length(PLS_mods3),
+                    function (i)
+                      lapply(1:length(PLS_mods3[[i]]),
+                             function (q)
+                      data.frame(predict(PLS_mods3[[i]][[q]], 
+                              newdata = L_NIRMIR))))
+
+# Absolute minimum in RMSE of LOO-CV
+minRMSE <- vector("list", length(PLS_mods3))
+
+for (i in 1:length(minRMSE)){
+  tempRMSE <- lapply(1:length(PLS_mods3[[i]]),
+                            function (s)
+                     which.min(
+                      as.data.frame(
+                        RMSEP(PLS_mods3[[i]][[s]])$val)[1,2:16]))
+  tempRMSE <- ifelse(tempRMSE == 0, 1, tempRMSE)
+  tempRMSE <- ifelse(tempRMSE == "NA", 1, tempRMSE)
+  minRMSE[[i]] <- tempRMSE
+  }
+
+# Re-code predictions into a neat data frame
+Pred_cal <- lapply(1:length(PLS_mods3),
+                   function (z)
+                     lapply(1:length(PLS_mods3[[z]]),
+                            function (s)
+                     data.frame(Measured = test_df[,c(var_ll[[s]])],
+                                Predicted = as.vector(predict(PLS_mods3[[z]][[s]],
+                                                    newdata = test_df,
+                                                    ncomp = minRMSE[[z]][[s]])),
+                                Soil_property = c(var_ll[[s]]),
+                                Spc_matrix = c(spc_matrix_l[[z]]),
+                                Dataset = c(mod_names[[s]]),
+                                Field = test_df$Field
+                                )
+                   ))
+
+
+# Compute prediction metrics
+for(i in 1:length(Pred_cal)) {
+  for (j in 1:length(Pred_cal[[i]])){
+            Pred_cal[[i]][[j]] <- Pred_cal[[i]][[j]] %>% 
+                     mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd2 = sd(sqrt((Predicted-Measured)^2)),
+            Mean_P = mean(Predicted),
+            SD_P = sd(Predicted),
+            n = n(),
+            Range_P = max(Predicted)-min(Predicted),
+            Mean_M = mean(Measured),
+            SD_M = sd(Measured),
+            Range_M = max(Measured)-min(Measured),
+           CCC = round(epiR::epi.ccc(Predicted,Measured)$rho.c$est,2),
+           Bias = round(mean(Predicted-Measured),2),
+           SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+           IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+                     mutate(.,
+                            RPIQ = signif((IQ/SEP),2),
+                            RPD = signif((SD_M/RMSE),2))
+  }
+}
+
+# Create long dataframe and exclude calcium
+Pred_df4 <- lapply(1:length(Pred_cal),
+                   function (x)
+                     do.call(rbind, Pred_cal[[x]]))#
+
+
+Pred_df4 <- lapply(1:length(Pred_df4),
+                   function (x)
+                     Pred_df4[[x]][Pred_df4[[x]]$Soil_property != "CALCIUM",])
+
+
+```
+
+# NIRMIR model averaging
+
+# TESTING DATASET
+
+```{r, echo = F, warning=F}
+
+# NIRMIR model averaging
+NIRMIR_Pred_l <- vector("list", length(W_Sp_NSI_df[[1]]))
+for (xx in 1:length(Pred_cal[[1]])){
+    NIRMIR_Pred_l[[xx]] <- cbind(
+      Pred_cal[[1]][[xx]][,c("Predicted")],
+      Pred_cal[[2]][[xx]][,c("Predicted")])                                 
+    }
+
+# TRAINING DATASET
+
+# NIRMIR model averaging
+NIRMIR_Pred_train_l <- vector("list", length(W_Sp_NSI_df[[1]]))
+for (xx in 1:length(W_Sp_NSI_df[[1]])){
+    NIRMIR_Pred_train_l[[xx]] <- cbind(
+      as.vector(predict(PLS_mods3[[1]][[xx]],
+                        newdata = W_Sp_NSI_df[[1]][[xx]],
+                        ncomp = minRMSE[[1]][[xx]])),
+      as.vector(predict(PLS_mods3[[2]][[xx]],
+                        newdata = W_Sp_NSI_df[[1]][[xx]],
+                        ncomp = minRMSE[[2]][[xx]])))                                 
+    }
+
+```
+
+# Forecomb object indexing
+
+```{r, echo = F, warning = F}
+
+# NIR MIR
+FORC_NIRMIR <- vector("list", length(W_Sp_NSI_df[[1]]))
+for (xx in 1:length(W_Sp_NSI_df[[1]])){
+    FORC_NIRMIR[[xx]] <- 
+      foreccomb(W_Sp_NSI_df[[1]][[xx]][,var_ll[[xx]]],
+                NIRMIR_Pred_train_l[[xx]],
+                #test_l[[ii]][,var_l[[xx]]],
+                newpreds = NIRMIR_Pred_l[[xx]])
+  }
+
+```
+
+# OLS Regression
+
+```{r, echo = F, warning = F}
+
+OLS_Results <- lapply(1:length(FORC_NIRMIR),
+                          function (z)
+                             comb_OLS(FORC_NIRMIR[[z]]))
+
+```
+
+# Create dataframes for OLS result (forecomb_res objects)
+
+```{r, echo = F, warning = F}
+
+OLS_l_df <- lapply(1:length(OLS_Results),
+                        function(xx)
+                           data.frame(Measured = test_df[,var_ll[[xx]]],
+                                      Predicted = OLS_Results[[xx]]$Forecasts_Test,
+                   Soil_property = c(var_ll[[xx]]),
+                   Spc_matrix = c("(V)NIRMIR"),
+                   Dataset = c(mod_names[[xx]]),
+                   Field = test_df$Field
+                                 ))
+
+for (ii in 1:length(OLS_l_df)){
+    OLS_l_df[[ii]] <-  OLS_l_df[[ii]] %>% 
+    mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd = sd(sqrt((Predicted-Measured)^2)),
+      CCC = c(rep(epiR::epi.ccc(Predicted,Measured)$rho.c$est,
+                     nrow(test_df))),
+      SD_M = sd(Measured),
+      Bias = round(mean(Predicted-Measured),2),
+      SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+      IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+        mutate(.,
+               RPIQ = signif((IQ/SEP),2),
+               RPD = signif((SD_M/RMSE),2))
+
+    }
+
+# Create long dataframe and exclude calcium
+W_Sp_pred <- do.call(rbind, OLS_l_df)
+
+W_Sp_pred <- W_Sp_pred[W_Sp_pred$Soil_property != "CALCIUM",]
+
+facetlims = W_Sp_pred %>% 
+  group_by(Dataset, Soil_property) %>% 
+  summarize(min = min(Measured, Predicted),
+            max = max(Measured, Predicted)) %>% 
+  gather(range, Measured, -Soil_property, -Dataset) %>% 
+  mutate(Predicted = Measured, range = NULL)
+
+
+```
+
+
+# Check residuals from regional dataset (spectral libraries) including spiking samples
+
+```{r, echo = F, warning = F}
+
+# Write residuals to list of data.frames
+t_l3 <- lapply(1:length(PLS_mods3), 
+               function (x)
+                 lapply(1:length(PLS_mods3[[x]]),
+                        function (z)
+                 data.frame(PLS_mods3[[x]][[z]]$residuals)[,minRMSE[[x]][[z]]]))
+
+for (i in 1:length(W_Sp_NSI_df[[1]])){
+  print(dim(W_Sp_NSI_df[[1]][[i]]))
+}
+
+# Bind with sample ID
+t_l4 <- lapply(1:length(PLS_mods3),
+               function (x)
+                 lapply(1:length(W_Sp_NSI_df[[x]]),
+                        function (z)
+                 data.frame(Bottle = W_Sp_NSI_df[[x]][[z]]$Bottle,
+                               Res = scale(t_l3[[x]][[z]])))) # Scaled
+
+des_fit3_l <- vector("list", length(PLS_mods3))
+
+for (i in 1:length(des_fit3_l)){
+  # Description of residuals for each model
+  des_fit3 = ""
+  for (j in seq(1:length(t_l3))){
+    ds <- as.data.frame(psych::describe(t_l3[[i]][[j]]))
+    des_fit3 <- rbind(des_fit3, ds)
+    }
+  
+  des_fit3 = data.frame(apply(des_fit3[2:nrow(des_fit3),],2,as.numeric))
+  
+  des_fit3_l[[i]] <- des_fit3
+  
+  }
+
+# Function to store ggplot() objects in list with skewness coefficient annotated in plot
+# Standardised residuals
+for (i in 1:length(spc_matrix_l)){
+  plot_tl3 <- lapply(1:length(t_l3[[i]]), function (x) ggplot()+
+                     geom_histogram(aes(scale((t_l3[[i]][[x]])),..density..), # scaled
+                                    color = "black",
+                                    fill = "white")+
+                     geom_text(aes(x = -Inf, y = Inf, 
+                                   hjust = 0, vjust = 1, 
+                                   label = paste("Skew =", signif(des_fit3[x,c("skew")],2))))+
+                     ggtitle(names(PLS_mods3[[i]][x]))+
+                     xlab("(-)"))
+
+  # Grid.arrange plot
+  seq_var_l <- as.list(split(c(1:length(var_ll)), 
+                             ceiling(seq_along(c(1:length(var_ll)))/length(var_l))))
+  
+  res_hist_l <- lapply(1:length(seq_var_l),
+                       function (z)
+                       grid.arrange(arrangeGrob(grobs = plot_tl3[c(seq_var_l[[z]])], 
+                                                ncol = 2, name = mod_names[[z]])))
+
+  }
+
+W_Sp_NSI_df_res_ch <- W_Sp_NSI_df[[1]]
+
+W_Sp_NSI_df_res <- W_Sp_NSI_df
+
+
+# Cut-off thresholds for standardized residuals
+min_c <- -3 
+max_c <- 3
+
+# ------------------------------------------------
+# Subset based on residual check
+for (i in 1:length(W_Sp_NSI_df[[1]])){
+  # NIR subset
+  s1 = t_l4[[1]][[i]][t_l4[[1]][[i]]$Res > max_c, ] # NIR
+  s2 = t_l4[[1]][[i]][t_l4[[1]][[i]]$Res < min_c, ] # 
+  
+  tempsubNIR <- W_Sp_NSI_df[[1]][[i]][!(W_Sp_NSI_df[[1]][[i]]$Bottle %in% s1$Bottle),] # s1
+  tempsubNIR <- tempsubNIR[!(tempsubNIR$Bottle %in% s2$Bottle),] # s2
+  
+  W_Sp_NSI_df_res[[1]][[i]] <- tempsubNIR
+  
+  s3 = t_l4[[2]][[i]][t_l4[[2]][[i]]$Res > max_c, ] # MIR
+  s4 = t_l4[[2]][[i]][t_l4[[2]][[i]]$Res < min_c, ] # 
+  
+  tempsubMIR <- W_Sp_NSI_df[[2]][[i]][!(W_Sp_NSI_df[[2]][[i]]$Bottle %in% s3$Bottle),] # s1
+  tempsubMIR <- tempsubMIR[!(tempsubMIR$Bottle %in% s4$Bottle),] # s2
+  
+  W_Sp_NSI_df_res[[2]][[i]] <- tempsubMIR
+  
+  s_all <- do.call(rbind, list(s1,s2,s3,s4))
+  
+  W_Sp_NSI_df_res_ch[[i]] <- W_Sp_NSI_df[[1]][[i]][!(W_Sp_NSI_df[[1]][[i]]$Bottle %in% s_all$Bottle),]
+  
+}
+
+
+# Check change in dimensions for each soil property and dataset
+for (i in 1:length(W_Sp_NSI_df_res_ch)){
+  print(paste(mod_names[[i]], var_ll[[i]]))
+  
+  print(dim(W_Sp_NSI_df[[1]][[i]])[1]-dim(W_Sp_NSI_df_res[[1]][[i]])[1])
+  
+  print(dim(W_Sp_NSI_df[[1]][[i]])[1]-dim(W_Sp_NSI_df_res[[2]][[i]])[1])
+  
+  print(dim(W_Sp_NSI_df[[1]][[i]])[1]- dim(W_Sp_NSI_df_res_ch[[i]])[1])
+}
+
+```
+
+# Re-compute Weighted spiked PLSR with residuals removed
+
+```{r, echo = F, warning = F}
+
+# Index spectral matrices
+spc_matrix_l <- c("gapD1NIR", "gapD1")
+
+# Run PLS models
+PLS_mods4 <- lapply(1:length(spc_matrix_l),
+                   function (x)
+                     lapply(1:length(W_Sp_NSI_df_res[[x]]),
+                            function (z)
+                              plsr(as.formula(paste(var_ll[[z]],"~",as.name(spc_matrix_l[[x]]))), 
+                                     scale = FALSE, trace = TRUE, 
+                                     data = W_Sp_NSI_df_res[[x]][[z]], ncomp = 15, 
+                                     validation = "LOO")
+                              ))
+
+# Rename pls objects
+mod_names <- rep(names(list_df[1:2]), each = length(var_l))
+
+for (i in 1:length(PLS_mods4)){
+  names(PLS_mods4[[i]]) <- c(paste(mod_names, var_ll))
+  }
+
+# Plot RMSE as a function of nr components included
+par(mfrow = c(2,3))
+RMSE_Plot = lapply(1:length(PLS_mods4), 
+                  function (x)
+                    lapply(1:length(PLS_mods4[[x]]),
+                           function (z)
+                    plot(RMSEP(PLS_mods4[[x]][[z]], 
+                               estimate = c("CV")),
+                                        main = names(PLS_mods4[[x]][z]),
+                         col = "blue", lty = 3)))
+
+# Predictions list
+pred_list <- lapply(1:length(PLS_mods4),
+                    function (i)
+                      lapply(1:length(PLS_mods4[[i]]),
+                             function (q)
+                      data.frame(predict(PLS_mods4[[i]][[q]], 
+                              newdata = L_NIRMIR))))
+
+# Absolute minimum in RMSE of LOO-CV
+minRMSE <- vector("list", length(PLS_mods4))
+
+for (i in 1:length(minRMSE)){
+  tempRMSE <- lapply(1:length(PLS_mods4[[i]]),
+                            function (s)
+                     which.min(
+                      as.data.frame(
+                        RMSEP(PLS_mods4[[i]][[s]])$val)[1,2:16]))
+  tempRMSE <- ifelse(tempRMSE == 0, 1, tempRMSE)
+  tempRMSE <- ifelse(tempRMSE == "NA", 1, tempRMSE)
+  minRMSE[[i]] <- tempRMSE
+  }
+
+# Re-code predictions into a neat data frame
+Pred_cal <- lapply(1:length(PLS_mods4),
+                   function (z)
+                     lapply(1:length(PLS_mods4[[z]]),
+                            function (s)
+                     data.frame(Measured = test_df[,c(var_ll[[s]])],
+                                Predicted = as.vector(predict(PLS_mods4[[z]][[s]],
+                                                    newdata = test_df,
+                                                    ncomp = minRMSE[[z]][[s]])),
+                                Soil_property = c(var_ll[[s]]),
+                                Spc_matrix = c(spc_matrix_l[[z]]),
+                                Dataset = c(mod_names[[s]]),
+                                Field = test_df$Field
+                                )
+                   ))
+
+
+# Compute prediction metrics
+for(i in 1:length(Pred_cal)) {
+  for (j in 1:length(Pred_cal[[i]])){
+            Pred_cal[[i]][[j]] <- Pred_cal[[i]][[j]] %>% 
+                     mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd2 = sd(sqrt((Predicted-Measured)^2)),
+            Mean_P = mean(Predicted),
+            SD_P = sd(Predicted),
+            n = n(),
+            Range_P = max(Predicted)-min(Predicted),
+            Mean_M = mean(Measured),
+            SD_M = sd(Measured),
+            Range_M = max(Measured)-min(Measured),
+           CCC = round(epiR::epi.ccc(Predicted,Measured)$rho.c$est,2),
+           Bias = round(mean(Predicted-Measured),2),
+           SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+           IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+                     mutate(.,
+                            RPIQ = signif((IQ/SEP),2),
+                            RPD = signif((SD_M/RMSE),2))
+  }
+}
+
+# Write to long data frame and exclude calcium
+Pred_df5 <- lapply(1:length(Pred_cal),
+                   function (x)
+                     do.call(rbind, Pred_cal[[x]]))#
+
+Pred_df5 <- lapply(1:length(Pred_df5),
+                   function (x)
+                     Pred_df5[[x]][Pred_df5[[x]]$Soil_property != "CALCIUM",])
+
+
+```
+
+# NIRMIR model averaging
+
+# TESTING DATASET
+
+```{r, echo = F, warning=F}
+
+# NIRMIR model averaging
+NIRMIR_Pred_l <- vector("list", length(W_Sp_NSI_df_res[[1]]))
+for (xx in 1:length(Pred_cal[[1]])){
+    NIRMIR_Pred_l[[xx]] <- cbind(
+      Pred_cal[[1]][[xx]][,c("Predicted")],
+      Pred_cal[[2]][[xx]][,c("Predicted")])                                 
+    }
+
+# TRAINING DATASET
+
+# NIRMIR model averaging
+NIRMIR_Pred_train_l <- vector("list", length(W_Sp_NSI_df_res_ch))
+for (xx in 1:length(W_Sp_NSI_df_res_ch)){
+    NIRMIR_Pred_train_l[[xx]] <- cbind(
+      as.vector(predict(PLS_mods4[[1]][[xx]],
+                        newdata = W_Sp_NSI_df_res_ch[[xx]],
+                        ncomp = minRMSE[[1]][[xx]])),
+      as.vector(predict(PLS_mods4[[2]][[xx]],
+                        newdata = W_Sp_NSI_df_res_ch[[xx]],
+                        ncomp = minRMSE[[2]][[xx]])))                                 
+    }
+
+```
+
+# Forecomb object indexing
+
+```{r, echo = F, warning = F}
+
+# NIR MIR
+FORC_NIRMIR <- vector("list", length(W_Sp_NSI_df_res_ch))
+for (xx in 1:length(W_Sp_NSI_df_res_ch)){
+    FORC_NIRMIR[[xx]] <- 
+      foreccomb(W_Sp_NSI_df_res_ch[[xx]][,var_ll[[xx]]],
+                NIRMIR_Pred_train_l[[xx]],
+                #test_l[[ii]][,var_l[[xx]]],
+                newpreds = NIRMIR_Pred_l[[xx]])
+  }
+
+```
+
+# OLS Regression
+
+```{r, echo = F, warning = F}
+
+OLS_Results <- lapply(1:length(FORC_NIRMIR),
+                          function (z)
+                             comb_OLS(FORC_NIRMIR[[z]]))
+
+```
+
+# Create dataframes for OLS result (forecomb_res objects)
+
+```{r, echo = F, warning = F}
+
+OLS_l_df <- lapply(1:length(OLS_Results),
+                        function(xx)
+                           data.frame(Measured = test_df[,var_ll[[xx]]],
+                                      Predicted = OLS_Results[[xx]]$Forecasts_Test,
+                   Soil_property = c(var_ll[[xx]]),
+                   Spc_matrix = c("(V)NIRMIR"),
+                   Dataset = c(mod_names[[xx]]),
+                   Field = test_df$Field
+                                 ))
+
+for (ii in 1:length(OLS_l_df)){
+    OLS_l_df[[ii]] <-  OLS_l_df[[ii]] %>% 
+    mutate(.,
+            RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+           RMSE_sd = sd(sqrt((Predicted-Measured)^2)),
+      CCC = c(rep(epiR::epi.ccc(Predicted,Measured)$rho.c$est,
+                     nrow(test_df))),
+      SD_M = sd(Measured),
+      Bias = round(mean(Predicted-Measured),2),
+      SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+      IQ = (quantile(Measured, probs = 0.75)-quantile(Measured,probs = 0.25))) %>% 
+        mutate(.,
+               RPIQ = signif((IQ/SEP),2),
+               RPD = signif((SD_M/RMSE),2))
+
+    }
+
+# Create long data.frame and exclude calcium
+W_Sp_res_pred <- do.call(rbind, OLS_l_df)
+
+W_Sp_res_pred <- W_Sp_res_pred[W_Sp_res_pred$Soil_property != "CALCIUM",]
+
+facetlims = W_Sp_res_pred %>% 
+  group_by(Dataset, Soil_property) %>% 
+  summarize(min = min(Measured, Predicted),
+            max = max(Measured, Predicted)) %>% 
+  gather(range, Measured, -Soil_property, -Dataset) %>% 
+  mutate(Predicted = Measured, range = NULL)
+
+```
+
+## Run PLS regression for the spiking dataset by itself
+
+```{r, echo = F, warning = F}
+
+W_Sp_sb_list <- lapply(1:length(NSI_df_long2[[1]]),
+                       function (z) do.call(rbind,
+                                            replicate(floor(
+                              nrow(NSI_df_long2[[1]][[z]])/nrow(Spike_sb)),
+                              Spike_sb,simplify = F)))
+
+
+n_weighting <- do.call(rbind, lapply(1:length(NSI_df_long2[[1]]),
+                      function (z)
+                               floor(nrow(NSI_df_long2[[1]][[z]])/nrow(Spike_sb)))
+                      )
+
+n_weighting
+
+```
+
+
+# Merge dataframes and create Figure 8
+
+```{r, echo=F,warning=F}
+
+Pred_df_loc <- read.table("Local_pred.txt", header = T, sep = '\t')
+
+glimpse(Pred_df_loc)
+glimpse(Pred_df3)
+
+# Cosmetics to align different datasets
+Df_list <- list(Pred_df3,W_Sp_res_pred) # does not include weigthed spiking subset 
+
+Df_list[[1]]$Dataset <- recode(Df_list[[1]]$Dataset,
+                               Stratification = "Stratified",
+                               Grid = "Regional")
+
+Df_list[[2]]$Dataset <- recode(Df_list[[2]]$Dataset,
+                               Stratification = "Spiked stratified",
+                               Grid = "Spiked regional")
+
+# Create long dataframe
+Fig4_df <- do.call(rbind, Df_list)
+
+for (i in 1:length(Df_list)){
+  print(colnames(Df_list[[i]]))
+}
+
+# Change local dataset to align with spectral library datasets
+Pred_df_loc$Type <- NULL
+Pred_df_loc$Order_Spc <- NULL
+
+Pred_df_loc$Dataset <- c("Field-scale")
+
+# Rbind local dataset to library predictions
+Fig4_df = rbind(Fig4_df, Pred_df_loc)
+
+# Recode labels and corresponding units
+Fig4_df$Soil_property  <- recode(Fig4_df$Soil_property,
+           CARBON = "Carbon (%)",
+           PH = "pH",
+           CLAY = "Clay (%)",
+           K_NITRATE = "K (mg/kg)",
+           P_OLSEN = "P (mg/kg)")
+
+Fig4_df$RMSE_label  <- recode(Fig4_df$Soil_property,
+           "Carbon (%)" = "(%) :",
+           "pH" = "(-) :",
+           "Clay (%)" = "(%) :",
+           "K (mg/kg)" = "(mg kg) :",
+           "P (mg/kg)" = "(mg kg) :")
+
+# Arrange order of facet
+Fig4_df$Dataset <- as.factor(Fig4_df$Dataset)
+#Fig4_df$Dataset <- factor(Fig4_df$Dataset, levels = c(5,2,4,3,1))
+Fig4_df$Soil_property <- as.factor(Fig4_df$Soil_property)
+Fig4_df$Soil_property <- factor(Fig4_df$Soil_property, 
+                                levels(Fig4_df$Soil_property)[c(1,5,2,4,3)])
+
+
+# Create blank facet_lims to plot from ordinate
+s = c("Stratified", "Regional", "Spiked stratified", "Spiked regional", "Field-scale")
+
+facetlims <- lapply(1:length(s),
+                    function (x) {Fig4_df %>% 
+                        group_by(Soil_property) %>% 
+                        summarize(min = min(Measured, Predicted),
+                                  max = max(Measured, Predicted)) %>%
+                        gather(range, Measured, -Soil_property) %>%
+                        mutate(Predicted = Measured,
+                               range = NULL,
+                               Dataset = s[x])})
+
+facetlims <- do.call(rbind, facetlims)
+
+# Change order in factor levels
+facetlims$Dataset <- factor(facetlims$Dataset,
+                          levels(factor(facetlims$Dataset))[c(5,2,4,3,1)])
+
+
+Fig4_df$Dataset <- factor(Fig4_df$Dataset,
+                          levels(factor(Fig4_df$Dataset))[c(5,2,4,3,1)])
+
+# Re assign value in facetlims to account for text overlapping datapoints
+st_names <- c("Measured", "Predicted")
+indx_L <- list(list(9,19,29,39,49),
+               list(10,20,30,40,50))
+indx_v <- c(130,1100)
+
+for (i in 1:length(st_names)){
+  for (j in 1:length(indx_L)){
+    for (y in 1:length(indx_L[[j]])){
+    facetlims[indx_L[[j]][[y]],c(st_names[i])] <- indx_v[j]
+    }
+  }
+}
+
+
+ggplot(Fig4_df,
+       aes(Measured,Predicted))+
+  geom_point()+
+  geom_abline(intercept = 0, slope = 1)+
+  facet_wrap(Soil_property~Dataset, 
+              scales = "free",
+             ncol = 5,
+             labeller = label_wrap_gen(multi_line=FALSE))+
+  scale_y_continuous(limits = c(0,NA))+
+  scale_x_continuous(limits = c(0,NA))+
+  xlab('Measured')+
+  ylab('Predicted')+
+  geom_blank(data = facetlims)+
+  geom_text(x = -Inf, y = Inf, 
+            label = paste("RMSE :", 
+                          signif(Fig4_df$RMSE, 2)), 
+            parse = T, hjust = 0, vjust = 1.25, size = 4, color = "black")+
+    geom_text(x = -Inf, y = Inf, 
+            label = paste("CCC :", 
+                          signif(Fig4_df$CCC, 2)), 
+            parse = T, hjust = 0, vjust = 2.5, size = 4, color = "black")+
+    geom_text(x = -Inf, y = Inf, 
+            label = paste("Bias :", 
+                          signif(Fig4_df$Bias, 2)), 
+            parse = T, hjust = 0, vjust = 3.85, size = 4, color = "black")+
+    geom_text(x = -Inf, y = Inf, 
+            label = paste("RPIQ :", 
+                          signif(Fig4_df$RPIQ, 2)), 
+            parse = T, hjust = 0, vjust = 4.9, size = 4, color = "black")+
+  theme(#legend.position = "top", 
+  legend.background = element_rect(fill = "transparent", color = "transparent"),
+  axis.text.x = element_text(size = 10),
+  axis.text.y = element_text(size = 10),
+  strip.text.x = element_text(size=13),
+  axis.title = element_text(size = 14),
+  legend.box.background = element_rect(colour = "black"))
+
+
+```
+
+
+# Figure 8 colored by Field
+
+```{r, echo = F, warning = F}
+
+# Recode labels
+Fig4_df$Field <- recode(Fig4_df$Field,
+                        "F1" = "Field 1",
+                        "F2" = "Field 2",
+                        "F3" = "Field 3",
+                        "F4" = "Field 4")
+
+# Dataset name vector
+s = c("Stratified", "Regional", "Spiked stratified", "Spiked regional", "Field-scale")
+
+facetlims <- lapply(1:length(s),
+                    function (x) {Fig4_df %>% 
+                        group_by(Soil_property) %>% 
+                        summarize(min = min(Measured, Predicted),
+                                  max = max(Measured, Predicted)) %>%
+                        gather(range, Measured, -Soil_property) %>%
+                        mutate(Predicted = Measured,
+                               range = NULL,
+                               Dataset = s[x])})
+
+facetlims <- do.call(rbind, facetlims)
+
+
+# Change order in factor levels
+facetlims$Dataset <- factor(facetlims$Dataset,
+                          levels(factor(facetlims$Dataset))[c(5,2,4,3,1)])
+
+#tiff(filename = "Suppl_Fig3.tiff",
+#    height = 11, width = 12, units = "in", pointsize = 1/300, res = 300)
+ggplot(Fig4_df,
+       aes(Measured,Predicted))+
+  geom_point(aes(color = Field))+
+  geom_abline(intercept = 0, slope = 1)+
+  facet_wrap(Soil_property~Dataset, 
+              scales = "free",
+             ncol = 5,
+             labeller = label_wrap_gen(multi_line=FALSE))+
+  scale_y_continuous(limits = c(0,NA))+
+  scale_x_continuous(limits = c(0,NA))+
+  xlab('Measured')+
+  ylab('Predicted')+
+  geom_blank(data = facetlims)+
+  geom_text(x = -Inf, y = Inf, 
+            label = paste("RMSE :", 
+                          signif(Fig4_df$RMSE, 2)), 
+            parse = T, hjust = 0, vjust = 1.25, size = 4, color = "black")+
+    geom_text(x = -Inf, y = Inf, 
+            label = paste("CCC :", 
+                          signif(Fig4_df$CCC, 2)), 
+            parse = T, hjust = 0, vjust = 2.5, size = 4, color = "black")+
+    geom_text(x = -Inf, y = Inf, 
+            label = paste("Bias :", 
+                          signif(Fig4_df$Bias, 2)), 
+            parse = T, hjust = 0, vjust = 3.85, size = 4, color = "black")+
+    geom_text(x = -Inf, y = Inf, 
+            label = paste("RPIQ :", 
+                          signif(Fig4_df$RPIQ, 2)), 
+            parse = T, hjust = 0, vjust = 4.9, size = 4, color = "black")+
+  theme(#legend.position = "top", 
+  legend.background = element_rect(fill = "transparent", color = "transparent"),
+  axis.text.x = element_text(size = 10),
+  axis.text.y = element_text(size = 10),
+  strip.text.x = element_text(size=13),
+  axis.title = element_text(size = 14),
+  legend.box.background = element_rect(colour = "black"))+
+  scale_color_manual(values = c("coral3",
+                                "cyan3",
+                                "midnightblue",
+                                "gold"))
+# dev.off()
+
+```
+
+# RPIQ relative to field-scale dataset
+
+```{r, echo = F, warning = F}
+
+table(Fig4_df$Soil_property)
+table(Fig4_df$Spc_matrix)
+table(Fig4_df$Dataset)
+
+splF4 <- split(Fig4_df, Fig4_df$Dataset)
+
+subF4 <- Fig4_df %>% 
+  filter(Dataset != "Field-scale") %>%
+  select(., Soil_property, Dataset, RMSE, RPIQ, Bias) %>%
+  mutate(.,
+         Dataset = recode(Dataset,
+                          "Spiked regional" = "Spiked regional library",
+                          "Spiked stratified" = "Spiked stratified library",
+                          "Regional" = "Regional library",
+                          "Stratified" = "Stratified library")) #%>%
+
+write.table(subF4, file = "D:/OneDrive - Rothamsted Research/Manuscripts/Manuscript 2/Manuscript2B_Data/RPIQRMSE_spiked.txt",
+            col.names = T, row.names = F, sep = '\t')
+
+  group_by(Soil_property, Dataset) %>% 
+  summarise(n = sum(RMSE),
+            m = sum(RPIQ)) %>% 
+  mutate(perc_RMSE = n / sum(n),
+         perc_RPIQ = m / sum(m)) %>% 
+  ggplot(., aes(x = Soil_property, y = percentage, fill = Dataset, 
+                group = Dataset))+
+  geom_area(alpha = 0.6, size = 1, color = "black")+
+  ylab("% RMSE")+
+  coord_cartesian(expand = FALSE)+
+  scale_y_continuous(limits = c(0,1))+
+  xlab(NULL)+
+  theme(text = element_text(size = 20)#,
+        #legend.text = element_text(size = 2)
+        )+
+  scale_fill_manual(values = c("ivory3",
+                               "orange",
+                               "forestgreen",
+                               "turquoise4"))
+
+
+sumsplF4 <- lapply(splF4,
+                   function (x) {
+                     x %>%
+                       group_by(.,Soil_property) %>%
+                       summarise(RPIQ = mean(RPIQ))
+                     }
+                   )
+
+
+for (i in 1:length(sumsplF4)){
+  sumsplF4[[i]]$RPIQ_ratio <- sumsplF4[[i]]$RPIQ/sumsplF4[[1]]$RPIQ
+  print(splF4[[i]]$Dataset)
+  print(sumsplF4[[i]])
+}
+
+```
+
+
